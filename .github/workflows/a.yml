@@ -1,3 +1,9 @@
+      - name: Build image
+        env:
+          ...
+        run: |
+          ...
+
       - name: Kiểm tra phân vùng EFI
         run: |
           sudo losetup -fP --show alpine.img | tee loopdev
@@ -8,3 +14,5 @@
           sudo find /mnt/esp
           sudo umount /mnt/esp
           sudo losetup -d "$LOOP"
+
+      - name: Đóng gói theo bản đã chọn
