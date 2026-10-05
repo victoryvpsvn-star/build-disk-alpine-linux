@@ -1,0 +1,10 @@
+      - name: Kiểm tra phân vùng EFI
+        run: |
+          sudo losetup -fP --show alpine.img | tee loopdev
+          LOOP=$(cat loopdev)
+          sudo parted -s "$LOOP" print
+          sudo mkdir -p /mnt/esp
+          sudo mount "${LOOP}p1" /mnt/esp
+          sudo find /mnt/esp
+          sudo umount /mnt/esp
+          sudo losetup -d "$LOOP"
