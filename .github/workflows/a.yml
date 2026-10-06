@@ -15,8 +15,8 @@ on:
         description: "Nhánh Alpine (vd: latest-stable, v3.22)"
         default: "latest-stable"
       image_size:
-        description: "Dung lượng file img (vd: 512M, 1G, 2G)"
-        default: "1G"
+        description: "Dung lượng ổ đĩa (vd: 2G, 4G, 8G, 20G)"
+        default: "4G"
       root_password:
         description: "Mật khẩu root"
         default: "root"
@@ -113,6 +113,166 @@ jobs:
           PermitEmptyPasswords no
           SSH
 
+          # ---------- Tự nhận biết IPv4 / IPv6 mỗi lần boot ----------
+          # Không tắt IPv6. Mỗi lần khởi động, script dưới đây thử kết nối thật
+          # rồi chỉnh curl, wget, ssh cho khớp với mạng đang có.
+          mkdir -p /etc/skel
+          cat > /etc/local.d/20-netdetect.start <<'NETDETECT'
+          #!/bin/sh
+          (
+            v4=0; v6=0; i=0
+            while [ "$i" -lt 30 ]; do
+              curl -q -4 -sk -o /dev/null --connect-timeout 3 https://1.1.1.1 && v4=1
+              curl -q -6 -sk -o /dev/null --connect-timeout 3 "https://[2606:4700:4700::1111]" && v6=1
+              if [ "$v4" = 1 ] || [ "$v6" = 1 ]; then break; fi
+              i=$((i+1)); sleep 2
+            done
+
+            # Có IPv4 (kể cả khi có cả IPv6) -> ưu tiên IPv4. Chỉ có IPv6 -> dùng IPv6.
+            if [ "$v4" = 1 ]; then
+              CURL=ipv4; WGET="inet4_only = on"; SSHFAM=inet
+            elif [ "$v6" = 1 ]; then
+              CURL=ipv6; WGET="inet6_only = on"; SSHFAM=inet6
+            else
+              echo "netdetect: chua co mang" > /run/netdetect.status
+              exit 0
+            fi
+
+            echo "$CURL" > /root/.curlrc
+            echo "$CURL" > /etc/skel/.curlrc
+            echo "$WGET" > /etc/wgetrc
+
+            sed -i '/^AddressFamily/d' /etc/ssh/ssh_config
+            echo "AddressFamily $SSHFAM" >> /etc/ssh/ssh_config
+
+            # sshd (server): có cả hai thì nghe cả hai
+            if [ "$v4" = 1 ] && [ "$v6" = 1 ]; then SRV=any
+            elif [ "$v4" = 1 ]; then SRV=inet
+            else SRV=inet6; fi
+            echo "AddressFamily $SRV" > /tmp/sshd-family.new
+            if ! cmp -s /tmp/sshd-family.new /etc/ssh/sshd_config.d/20-family.conf 2>/dev/null; then
+              cp /tmp/sshd-family.new /etc/ssh/sshd_config.d/20-family.conf
+              rc-service sshd restart >/dev/null 2>&1
+            fi
+
+            echo "netdetect: v4=$v4 v6=$v6 curl=$CURL ssh=$SSHFAM sshd=$SRV" > /run/netdetect.status
+          ) &
+          NETDETECT
+          chmod +x /etc/local.d/20-netdetect.start
+
+          # ---------- Tự tối ưu theo cấu hình máy (RAM / CPU) mỗi lần boot ----------
+          cat > /etc/local.d/30-autotune.start <<'AUTOTUNE'
+          #!/bin/sh
+          MEM=$(awk '/^MemTotal/{print int($2/1024)}' /proc/meminfo)
+          CPU=$(nproc 2>/dev/null || echo 1)
+
+          # Phân loại máy: low (rất yếu) / mid (vừa) / high (khỏe)
+          if [ "$MEM" -le 512 ] || { [ "$CPU" -le 1 ] && [ "$MEM" -le 1024 ]; }; then
+            TIER=low
+          elif [ "$MEM" -le 1536 ]; then
+            TIER=mid
+          else
+            TIER=high
+          fi
+
+          # Giảm ghi đĩa: không cập nhật thời gian truy cập file
+          mount -o remount,noatime / 2>/dev/null
+
+          # Swap nén trong RAM (zram) cho máy ít RAM
+          ZRAM=0
+          if [ "$MEM" -le 2048 ] && [ -z "$(tail -n +2 /proc/swaps)" ]; then
+            if modprobe zram 2>/dev/null && [ -e /sys/block/zram0/disksize ]; then
+              echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null
+              if [ "$TIER" = low ]; then SZ=$MEM; else SZ=$((MEM / 2)); fi
+              echo "${SZ}M" > /sys/block/zram0/disksize
+              if mkswap /dev/zram0 >/dev/null 2>&1 && swapon -p 100 /dev/zram0 2>/dev/null; then
+                ZRAM=1
+              fi
+            fi
+          fi
+
+          # Thông số bộ nhớ theo từng loại máy
+          case "$TIER" in
+            low)  SWP=100; DR=10; DB=5  ;;
+            mid)  SWP=60;  DR=15; DB=5  ;;
+            *)    SWP=10;  DR=20; DB=10 ;;
+          esac
+          if [ "$ZRAM" = 0 ]; then SWP=10; fi
+          sysctl -w vm.swappiness=$SWP vm.vfs_cache_pressure=50 \
+                    vm.dirty_ratio=$DR vm.dirty_background_ratio=$DB >/dev/null 2>&1
+          if [ "$ZRAM" = 1 ]; then sysctl -w vm.page-cluster=0 >/dev/null 2>&1; fi
+
+          # Máy yếu: tắt transparent hugepage để đỡ tốn RAM
+          if [ "$TIER" = low ] && [ -w /sys/kernel/mm/transparent_hugepage/enabled ]; then
+            echo never > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null
+          fi
+
+          # Ổ ảo: dùng bộ lập lịch I/O nhẹ nhất
+          for q in /sys/block/sd*/queue/scheduler; do
+            [ -w "$q" ] || continue
+            echo none > "$q" 2>/dev/null || echo mq-deadline > "$q" 2>/dev/null
+          done
+
+          echo "autotune: tier=$TIER mem=${MEM}MB cpu=$CPU zram=$ZRAM swappiness=$SWP" > /run/autotune.status
+          AUTOTUNE
+          chmod +x /etc/local.d/30-autotune.start
+
+          # Mỗi tuần trả lại block trống cho file VHDX (giúp file nhỏ lại khi tối ưu trên Windows)
+          mkdir -p /etc/periodic/weekly
+          cat > /etc/periodic/weekly/fstrim <<'FSTRIM'
+          #!/bin/sh
+          fstrim / >/dev/null 2>&1
+          fstrim /boot >/dev/null 2>&1
+          exit 0
+          FSTRIM
+          chmod +x /etc/periodic/weekly/fstrim
+
+          # ---------- Lệnh updisk: tự nhận ổ đĩa to hơn rồi mở rộng phân vùng + hệ thống file ----------
+          cat > /usr/local/bin/updisk <<'UPDISK'
+          #!/bin/sh
+          # updisk: sau khi tăng dung lượng ổ ảo (Hyper-V: Edit Disk -> Expand), chạy lệnh này.
+          set -u
+          [ "$(id -u)" = 0 ] || { echo "Cần chạy bằng root"; exit 1; }
+
+          ROOT=$(awk '$2=="/" && $1 ~ /^\/dev\//{d=$1} END{print d}' /proc/mounts)
+          [ -n "$ROOT" ] || { echo "Không xác định được phân vùng gốc"; exit 1; }
+          ROOT=$(readlink -f "$ROOT")
+          NAME=${ROOT##*/}
+          PARTNUM=$(cat /sys/class/block/$NAME/partition 2>/dev/null)
+          [ -n "$PARTNUM" ] || { echo "$ROOT không phải là phân vùng"; exit 1; }
+          DISKNAME=$(basename "$(readlink -f /sys/class/block/$NAME/..)")
+          DISK=/dev/$DISKNAME
+
+          mb() { echo $(( $(cat /sys/class/block/$1/size) * 512 / 1048576 )); }
+
+          echo "Ổ đĩa: $DISK | Phân vùng gốc: $ROOT (số $PARTNUM)"
+          echo 1 > /sys/class/block/$DISKNAME/device/rescan 2>/dev/null
+          echo "Dung lượng ổ ảo  : $(mb $DISKNAME) MB"
+          echo "Phân vùng gốc    : $(mb $NAME) MB"
+          df -h / | tail -1
+
+          # 1) Mở rộng phân vùng cho hết ổ đĩa
+          out=$(growpart "$DISK" "$PARTNUM" 2>&1); rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -q NOCHANGE; then
+            echo "Mở rộng phân vùng thất bại. Nếu báo hết chỗ, hãy xóa bớt file rồi chạy lại."
+            exit 1
+          fi
+          partprobe "$DISK" 2>/dev/null
+
+          # 2) Mở rộng hệ thống file cho hết phân vùng (làm được khi đang chạy)
+          FSTYPE=$(blkid -o value -s TYPE "$ROOT")
+          case "$FSTYPE" in
+            ext2|ext3|ext4) resize2fs "$ROOT" ;;
+            *) echo "Hệ thống file '$FSTYPE' chưa được hỗ trợ"; exit 1 ;;
+          esac
+
+          echo "---- Kết quả ----"
+          echo "Phân vùng gốc    : $(mb $NAME) MB"
+          df -h / | tail -1
+          UPDISK
+          chmod +x /usr/local/bin/updisk
+
           # ---------- Hyper-V: driver disk + mạng vào initramfs ----------
           if [ "$HYPERV" = "1" ]; then
             mkdir -p /etc/mkinitfs/features.d
@@ -152,7 +312,7 @@ jobs:
             --image-size "$SIZE" \
             --branch "$BRANCH" \
             --serial-console \
-            --packages "alpine-base openssh chrony busybox-openrc e2fsprogs $EXTRA" \
+            --packages "alpine-base openssh chrony busybox-openrc e2fsprogs e2fsprogs-extra cloud-utils-growpart sfdisk parted curl $EXTRA" \
             --script-chroot \
             alpine.img \
             ./setup.sh
