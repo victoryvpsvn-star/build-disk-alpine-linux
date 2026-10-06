@@ -293,6 +293,117 @@ jobs:
           EOF
           sudo chmod +x "$T/usr/local/bin/updisk"
 
+          # ---------- Lệnh addswap: tạo / gỡ swapfile ----------
+          sudo tee "$T/usr/local/bin/addswap" >/dev/null <<'EOF'
+          #!/bin/sh
+          # addswap [dung lượng]  : tạo swapfile (mặc định 512M), bật ngay và ghi vào /etc/fstab
+          # addswap off           : tắt và xóa swapfile
+          [ "$(id -u)" = 0 ] || { echo "Cần chạy bằng root"; exit 1; }
+          FILE=/swapfile
+
+          if [ "${1:-}" = "off" ]; then
+            swapoff "$FILE" 2>/dev/null
+            rm -f "$FILE"
+            sed -i '\|^/swapfile |d' /etc/fstab
+            echo "Đã gỡ swapfile."
+            free -m
+            exit 0
+          fi
+
+          SIZE=${1:-512M}
+          if swapon --show=NAME --noheadings | grep -q .; then
+            echo "Máy đã có swap:"
+            swapon --show
+            exit 0
+          fi
+
+          BYTES=$(numfmt --from=iec "$SIZE" 2>/dev/null) || { echo "Dung lượng không hợp lệ: $SIZE (ví dụ: 512M, 1G)"; exit 1; }
+          NEED=$(( BYTES / 1048576 ))
+          FREE=$(df -Pm / | awk 'NR==2{print $4}')
+          if [ "$FREE" -lt $(( NEED + 256 )) ]; then
+            echo "Không đủ chỗ: cần $NEED MB (+256 MB dự phòng), ổ chỉ còn $FREE MB trống."
+            exit 1
+          fi
+
+          fallocate -l "$BYTES" "$FILE" || { echo "Không tạo được $FILE"; exit 1; }
+          chmod 600 "$FILE"
+          mkswap "$FILE" >/dev/null
+          swapon "$FILE"
+          grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          echo "Đã bật swap $SIZE:"
+          free -m
+          EOF
+          sudo chmod +x "$T/usr/local/bin/addswap"
+
+          # ---------- Lệnh slim: dọn máy để file VHDX thu nhỏ được ----------
+          sudo tee "$T/usr/local/bin/slim" >/dev/null <<'EOF'
+          #!/bin/sh
+          # slim      : dọn cache, log, file tạm rồi chạy fstrim, hỏi có tắt máy không
+          # slim -y   : dọn xong tắt máy luôn, không hỏi
+          [ "$(id -u)" = 0 ] || { echo "Cần chạy bằng root"; exit 1; }
+
+          echo "Trước khi dọn:"
+          df -h / | tail -1
+
+          apt-get clean
+          rm -rf /var/lib/apt/lists/*
+          rm -rf /tmp/* /var/tmp/* /root/.cache /root/.npm/_cacache
+          journalctl --vacuum-size=1M >/dev/null 2>&1
+          rm -f /var/log/*.log /var/log/*.gz /var/log/*.[0-9] 2>/dev/null
+          sync
+          fstrim -av
+
+          echo "Sau khi dọn:"
+          df -h / | tail -1
+          echo "Lưu ý: đã xóa danh sách gói apt, lần cài gói tới cần chạy 'apt update' trước."
+          echo "Muốn file VHDX nhỏ lại thật: tắt VM rồi chạy Optimize-VHD -Mode Full trên Windows."
+
+          if [ "${1:-}" = "-y" ]; then
+            poweroff
+          elif [ -t 0 ]; then
+            printf 'Tắt máy ngay? [y/N] '
+            read -r ans
+            case "$ans" in y|Y) poweroff ;; esac
+          fi
+          EOF
+          sudo chmod +x "$T/usr/local/bin/slim"
+
+          # ---------- Lệnh ipcheck: kiểm tra mạng một lượt ----------
+          sudo tee "$T/usr/local/bin/ipcheck" >/dev/null <<'EOF'
+          #!/bin/sh
+          # ipcheck: in IP, gateway, DNS, thử kết nối IPv4/IPv6 và IP công khai
+          echo "== Giao diện mạng =="
+          ip -brief addr
+          echo
+          echo "== Gateway =="
+          echo "IPv4: $(ip -4 route show default | head -1)"
+          echo "IPv6: $(ip -6 route show default | head -1)"
+          echo
+          echo "== DNS =="
+          grep '^nameserver' /etc/resolv.conf
+          if getent ahostsv4 example.com >/dev/null 2>&1; then
+            echo "Phân giải tên miền: OK"
+          else
+            echo "Phân giải tên miền: LỖI"
+          fi
+          echo
+          echo "== Kết nối internet =="
+          if curl -q -4 -sk -o /dev/null --connect-timeout 4 https://1.1.1.1; then
+            echo "IPv4: OK, IP công khai $(curl -q -4 -s --connect-timeout 4 https://api.ipify.org)"
+          else
+            echo "IPv4: KHÔNG kết nối được"
+          fi
+          if curl -q -6 -sk -o /dev/null --connect-timeout 4 "https://[2606:4700:4700::1111]"; then
+            echo "IPv6: OK, IP công khai $(curl -q -6 -s --connect-timeout 4 https://api6.ipify.org)"
+          else
+            echo "IPv6: KHÔNG kết nối được"
+          fi
+          echo
+          echo "== Cấu hình tự nhận (netdetect) =="
+          cat /run/netdetect.status 2>/dev/null || echo "chưa có kết quả"
+          EOF
+          sudo chmod +x "$T/usr/local/bin/ipcheck"
+
           # ---------- Nhẹ: log trong RAM, bỏ timer cập nhật, fstrim hàng ngày ----------
           sudo mkdir -p "$T/etc/systemd/journald.conf.d" "$T/etc/systemd/system/fstrim.timer.d"
           printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=16M\n' | sudo tee "$T/etc/systemd/journald.conf.d/volatile.conf" >/dev/null
