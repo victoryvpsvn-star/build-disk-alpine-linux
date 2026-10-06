@@ -1,33 +1,25 @@
-name: Build Alpine Linux IMG
+name: Build Debian Minimal VHDX (Hyper-V Gen2)
 
 on:
   workflow_dispatch:
     inputs:
-      target:
-        description: "Bản build: img (thường), hyperv-gen1 (BIOS), hyperv-gen2 (UEFI)"
-        type: choice
-        options:
-          - img
-          - hyperv-gen1
-          - hyperv-gen2
-        default: img
-      alpine_branch:
-        description: "Nhánh Alpine (vd: latest-stable, v3.22)"
-        default: "latest-stable"
+      debian_suite:
+        description: "Bản Debian (trixie = Debian 13, bookworm = Debian 12)"
+        default: "trixie"
       image_size:
-        description: "Dung lượng ổ đĩa (vd: 2G, 4G, 8G, 20G)"
-        default: "4G"
+        description: "Dung lượng ổ đĩa (vd: 10G, 20G, 30G)"
+        default: "30G"
       root_password:
         description: "Mật khẩu root"
         default: "root"
       hostname:
         description: "Hostname"
-        default: "alpine"
+        default: "debian"
       extra_packages:
         description: "Gói cài thêm (cách nhau bằng dấu cách)"
-        default: "curl wget nano htop bash iproute2 bind-tools"
+        default: "wget nano htop bind9-dnsutils"
       make_release:
-        description: "Đẩy lên GitHub Release (file .img.xz)"
+        description: "Đẩy lên GitHub Release (file .zip)"
         type: boolean
         default: true
 
@@ -37,204 +29,234 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Cài công cụ trên runner
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-utils e2fsprogs dosfstools util-linux parted xz-utils zip wget
-          sudo modprobe nbd max_part=8
+          sudo apt-get install -y debootstrap qemu-utils parted dosfstools e2fsprogs util-linux grub-efi-amd64-bin grub-common zip wget
 
-      - name: Tải alpine-make-vm-image
+      - name: Lấy keyring Debian mới nhất
         run: |
-          wget -q https://raw.githubusercontent.com/alpinelinux/alpine-make-vm-image/v0.13.4/alpine-make-vm-image
-          chmod +x alpine-make-vm-image
+          BASE=https://deb.debian.org/debian/pool/main/d/debian-archive-keyring
+          KR_DEB=$(wget -qO- "$BASE/" | grep -o 'debian-archive-keyring_[0-9.]*_all\.deb' | sort -uV | tail -1)
+          test -n "$KR_DEB"
+          wget -q "$BASE/$KR_DEB"
+          dpkg -x "$KR_DEB" keyring
+          echo "KEYRING=$PWD/keyring/usr/share/keyrings/debian-archive-keyring.gpg" >> "$GITHUB_ENV"
 
-      - name: Tạo file cấu hình + script setup (chạy trong chroot)
+      - name: Build image Debian
         env:
           ROOT_PW: ${{ inputs.root_password }}
           HOST_NAME: ${{ inputs.hostname }}
-          TARGET: ${{ inputs.target }}
+          SIZE: ${{ inputs.image_size }}
+          SUITE: ${{ inputs.debian_suite }}
+          EXTRA: ${{ inputs.extra_packages }}
         run: |
-          # Lưu biến vào file để script trong chroot đọc
-          {
-            printf 'ROOT_PW=%q\n' "$ROOT_PW"
-            printf 'HOST_NAME=%q\n' "$HOST_NAME"
-            case "$TARGET" in hyperv-*) echo 'HYPERV=1' ;; *) echo 'HYPERV=0' ;; esac
-          } > config.env
+          set -euo pipefail
+          T=/mnt/target
+          LOOP=""
 
-          cat > setup.sh <<'EOF'
-          #!/bin/sh
-          set -eu
-          cd /mnt
-          . ./config.env
+          cleanup() {
+            set +e
+            sudo umount -R "$T" 2>/dev/null
+            if [ -n "${LOOP:-}" ]; then sudo losetup -d "$LOOP" 2>/dev/null; fi
+          }
+          trap cleanup EXIT
 
-          # ---------- Root ----------
-          echo "root:${ROOT_PW}" | chpasswd
-          passwd -u root 2>/dev/null || true
+          ch() { sudo chroot "$T" /usr/bin/env DEBIAN_FRONTEND=noninteractive LANG=C "$@"; }
 
-          # ---------- Hostname ----------
-          echo "${HOST_NAME}" > /etc/hostname
+          # ---------- Tạo ổ đĩa + phân vùng GPT (EFI 64MiB + root) ----------
+          truncate -s "$SIZE" debian.img
+          LOOP=$(sudo losetup -fP --show debian.img)
+          sudo parted -s "$LOOP" mklabel gpt \
+            mkpart ESP fat32 1MiB 65MiB set 1 esp on \
+            mkpart root ext4 65MiB 100%
+          sudo partprobe "$LOOP"
+          sudo udevadm settle
+          sudo mkfs.vfat -F32 -n EFI "${LOOP}p1"
+          sudo mkfs.ext4 -F -m 1 -L root -E lazy_itable_init=1,lazy_journal_init=1 "${LOOP}p2"
+          ROOT_UUID=$(sudo blkid -s UUID -o value "${LOOP}p2")
+          ESP_UUID=$(sudo blkid -s UUID -o value "${LOOP}p1")
+          echo "Root UUID: $ROOT_UUID | ESP UUID: $ESP_UUID"
 
-          # ---------- Mạng: DHCP sẵn ----------
-          cat > /etc/network/interfaces <<'NET'
-          auto lo
-          iface lo inet loopback
+          sudo mkdir -p "$T"
+          sudo mount "${LOOP}p2" "$T"
+          sudo mkdir -p "$T/boot/efi"
+          sudo mount "${LOOP}p1" "$T/boot/efi"
 
-          auto eth0
-          iface eth0 inet dhcp
-          NET
+          # ---------- Cài hệ thống tối giản (không GUI) ----------
+          SCRIPT=""
+          if [ ! -e "/usr/share/debootstrap/scripts/$SUITE" ]; then SCRIPT=/usr/share/debootstrap/scripts/sid; fi
+          sudo debootstrap --arch=amd64 --variant=minbase --components=main \
+            --keyring="$KEYRING" \
+            --include=systemd-sysv,udev,dbus,libpam-systemd,debian-archive-keyring \
+            "$SUITE" "$T" http://deb.debian.org/debian $SCRIPT
 
-          cat > /etc/resolv.conf <<'DNS'
-          nameserver 1.1.1.1
-          nameserver 8.8.8.8
-          DNS
+          sudo mount --bind /dev "$T/dev"
+          sudo mount -t devpts devpts "$T/dev/pts"
+          sudo mount -t proc proc "$T/proc"
+          sudo mount -t sysfs sysfs "$T/sys"
 
-          # Phòng trường hợp tên card mạng không phải eth0
-          mkdir -p /etc/local.d
-          cat > /etc/local.d/10-autonet.start <<'AUTO'
-          #!/bin/sh
-          sleep 2
-          for dev in $(ls /sys/class/net | grep -v '^lo$'); do
-            ip link set "$dev" up
-            if ! ip -4 addr show "$dev" | grep -q 'inet '; then
-              udhcpc -b -i "$dev" -q >/dev/null 2>&1 &
-            fi
-          done
-          AUTO
-          chmod +x /etc/local.d/10-autonet.start
+          # Không tự chạy dịch vụ trong lúc cài
+          printf '#!/bin/sh\nexit 101\n' | sudo tee "$T/usr/sbin/policy-rc.d" >/dev/null
+          sudo chmod +x "$T/usr/sbin/policy-rc.d"
 
-          # ---------- SSH root bằng mật khẩu ----------
-          mkdir -p /etc/ssh/sshd_config.d
-          cat > /etc/ssh/sshd_config.d/10-root.conf <<'SSH'
+          # Nguồn gói (có cập nhật + bảo mật), bỏ sources.list cũ
+          sudo rm -f "$T/etc/apt/sources.list"
+          sudo tee "$T/etc/apt/sources.list.d/debian.sources" >/dev/null <<EOF
+          Types: deb
+          URIs: http://deb.debian.org/debian
+          Suites: $SUITE ${SUITE}-updates
+          Components: main
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+          Types: deb
+          URIs: http://deb.debian.org/debian-security
+          Suites: ${SUITE}-security
+          Components: main
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          EOF
+
+          # Nhẹ: không cài gói gợi ý, bỏ tài liệu/man/ngôn ngữ
+          printf 'APT::Install-Recommends "false";\nAPT::Install-Suggests "false";\n' | sudo tee "$T/etc/apt/apt.conf.d/01lean" >/dev/null
+          sudo tee "$T/etc/dpkg/dpkg.cfg.d/01_nodoc" >/dev/null <<'EOF'
+          path-exclude=/usr/share/doc/*
+          path-exclude=/usr/share/man/*
+          path-exclude=/usr/share/info/*
+          path-exclude=/usr/share/locale/*
+          path-include=/usr/share/doc/*/copyright
+          EOF
+
+          # initramfs phải có driver Hyper-V (không dùng MODULES=dep vì sẽ dò máy runner)
+          sudo mkdir -p "$T/etc/initramfs-tools/conf.d"
+          printf 'MODULES=most\n' | sudo tee "$T/etc/initramfs-tools/conf.d/modules.conf" >/dev/null
+          printf 'RESUME=none\n' | sudo tee "$T/etc/initramfs-tools/conf.d/resume.conf" >/dev/null
+          printf '%s\n' hv_vmbus hv_storvsc hv_netvsc hv_utils hv_balloon | sudo tee -a "$T/etc/initramfs-tools/modules" >/dev/null
+
+          ch apt-get update
+          ch apt-get install -y linux-image-cloud-amd64 initramfs-tools kmod \
+            systemd-timesyncd openssh-server iproute2 iputils-ping ca-certificates curl \
+            cloud-guest-utils $EXTRA
+
+          # ---------- Hostname, hosts, DNS ----------
+          printf '%s\n' "$HOST_NAME" | sudo tee "$T/etc/hostname" >/dev/null
+          sudo tee "$T/etc/hosts" >/dev/null <<EOF
+          127.0.0.1 localhost
+          127.0.1.1 $HOST_NAME
+          ::1 localhost ip6-localhost ip6-loopback
+          EOF
+          sudo rm -f "$T/etc/resolv.conf"
+          printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' | sudo tee "$T/etc/resolv.conf" >/dev/null
+
+          # ---------- fstab ----------
+          sudo tee "$T/etc/fstab" >/dev/null <<EOF
+          UUID=$ROOT_UUID / ext4 errors=remount-ro,noatime 0 1
+          UUID=$ESP_UUID /boot/efi vfat umask=0077,nofail 0 2
+          EOF
+
+          # ---------- Mạng: DHCP bằng systemd-networkd (có gửi hostname) ----------
+          sudo mkdir -p "$T/etc/systemd/network"
+          sudo tee "$T/etc/systemd/network/10-dhcp.network" >/dev/null <<'EOF'
+          [Match]
+          Name=en* eth*
+
+          [Network]
+          DHCP=yes
+
+          [DHCPv4]
+          SendHostname=true
+          EOF
+
+          # ---------- Root + SSH ----------
+          printf 'root:%s\n' "$ROOT_PW" | sudo chroot "$T" chpasswd
+          sudo mkdir -p "$T/etc/ssh/sshd_config.d" "$T/etc/ssh/ssh_config.d"
+          sudo tee "$T/etc/ssh/sshd_config.d/10-root.conf" >/dev/null <<'EOF'
           PermitRootLogin yes
           PasswordAuthentication yes
           PermitEmptyPasswords no
-          SSH
+          EOF
 
-          # ---------- Tự nhận biết IPv4 / IPv6 mỗi lần boot ----------
-          # Không tắt IPv6. Mỗi lần khởi động, script dưới đây thử kết nối thật
-          # rồi chỉnh curl, wget, ssh cho khớp với mạng đang có.
-          mkdir -p /etc/skel
-          cat > /etc/local.d/20-netdetect.start <<'NETDETECT'
+          # Mỗi VM sinh host key riêng ở lần boot đầu (không dùng chung key trong image)
+          sudo rm -f "$T"/etc/ssh/ssh_host_*
+          sudo tee "$T/etc/systemd/system/ssh-hostkeys.service" >/dev/null <<'EOF'
+          [Unit]
+          Description=Generate SSH host keys
+          Before=ssh.service
+          ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/ssh-keygen -A
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # ---------- Tự nhận IPv4 / IPv6 mỗi lần boot ----------
+          sudo tee "$T/usr/local/sbin/netdetect" >/dev/null <<'EOF'
           #!/bin/sh
-          (
-            v4=0; v6=0; i=0
-            while [ "$i" -lt 30 ]; do
-              curl -q -4 -sk -o /dev/null --connect-timeout 3 https://1.1.1.1 && v4=1
-              curl -q -6 -sk -o /dev/null --connect-timeout 3 "https://[2606:4700:4700::1111]" && v6=1
-              if [ "$v4" = 1 ] || [ "$v6" = 1 ]; then break; fi
-              i=$((i+1)); sleep 2
-            done
-
-            # Có IPv4 (kể cả khi có cả IPv6) -> ưu tiên IPv4. Chỉ có IPv6 -> dùng IPv6.
-            if [ "$v4" = 1 ]; then
-              CURL=ipv4; WGET="inet4_only = on"; SSHFAM=inet
-            elif [ "$v6" = 1 ]; then
-              CURL=ipv6; WGET="inet6_only = on"; SSHFAM=inet6
-            else
-              echo "netdetect: chua co mang" > /run/netdetect.status
-              exit 0
-            fi
-
-            echo "$CURL" > /root/.curlrc
-            echo "$CURL" > /etc/skel/.curlrc
-            echo "$WGET" > /etc/wgetrc
-
-            sed -i '/^AddressFamily/d' /etc/ssh/ssh_config
-            echo "AddressFamily $SSHFAM" >> /etc/ssh/ssh_config
-
-            # sshd (server): có cả hai thì nghe cả hai
-            if [ "$v4" = 1 ] && [ "$v6" = 1 ]; then SRV=any
-            elif [ "$v4" = 1 ]; then SRV=inet
-            else SRV=inet6; fi
-            echo "AddressFamily $SRV" > /tmp/sshd-family.new
-            if ! cmp -s /tmp/sshd-family.new /etc/ssh/sshd_config.d/20-family.conf 2>/dev/null; then
-              cp /tmp/sshd-family.new /etc/ssh/sshd_config.d/20-family.conf
-              rc-service sshd restart >/dev/null 2>&1
-            fi
-
-            echo "netdetect: v4=$v4 v6=$v6 curl=$CURL ssh=$SSHFAM sshd=$SRV" > /run/netdetect.status
-          ) &
-          NETDETECT
-          chmod +x /etc/local.d/20-netdetect.start
-
-          # ---------- Tự tối ưu theo cấu hình máy (RAM / CPU) mỗi lần boot ----------
-          cat > /etc/local.d/30-autotune.start <<'AUTOTUNE'
-          #!/bin/sh
-          MEM=$(awk '/^MemTotal/{print int($2/1024)}' /proc/meminfo)
-          CPU=$(nproc 2>/dev/null || echo 1)
-
-          # Phân loại máy: low (rất yếu) / mid (vừa) / high (khỏe)
-          if [ "$MEM" -le 512 ] || { [ "$CPU" -le 1 ] && [ "$MEM" -le 1024 ]; }; then
-            TIER=low
-          elif [ "$MEM" -le 1536 ]; then
-            TIER=mid
-          else
-            TIER=high
-          fi
-
-          # Giảm ghi đĩa: không cập nhật thời gian truy cập file
-          mount -o remount,noatime / 2>/dev/null
-
-          # Swap nén trong RAM (zram) cho máy ít RAM
-          ZRAM=0
-          if [ "$MEM" -le 2048 ] && [ -z "$(tail -n +2 /proc/swaps)" ]; then
-            if modprobe zram 2>/dev/null && [ -e /sys/block/zram0/disksize ]; then
-              echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null
-              if [ "$TIER" = low ]; then SZ=$MEM; else SZ=$((MEM / 2)); fi
-              echo "${SZ}M" > /sys/block/zram0/disksize
-              if mkswap /dev/zram0 >/dev/null 2>&1 && swapon -p 100 /dev/zram0 2>/dev/null; then
-                ZRAM=1
-              fi
-            fi
-          fi
-
-          # Thông số bộ nhớ theo từng loại máy
-          case "$TIER" in
-            low)  SWP=100; DR=10; DB=5  ;;
-            mid)  SWP=60;  DR=15; DB=5  ;;
-            *)    SWP=10;  DR=20; DB=10 ;;
-          esac
-          if [ "$ZRAM" = 0 ]; then SWP=10; fi
-          sysctl -w vm.swappiness=$SWP vm.vfs_cache_pressure=50 \
-                    vm.dirty_ratio=$DR vm.dirty_background_ratio=$DB >/dev/null 2>&1
-          if [ "$ZRAM" = 1 ]; then sysctl -w vm.page-cluster=0 >/dev/null 2>&1; fi
-
-          # Máy yếu: tắt transparent hugepage để đỡ tốn RAM
-          if [ "$TIER" = low ] && [ -w /sys/kernel/mm/transparent_hugepage/enabled ]; then
-            echo never > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null
-          fi
-
-          # Ổ ảo: dùng bộ lập lịch I/O nhẹ nhất
-          for q in /sys/block/sd*/queue/scheduler; do
-            [ -w "$q" ] || continue
-            echo none > "$q" 2>/dev/null || echo mq-deadline > "$q" 2>/dev/null
+          v4=0; v6=0; i=0
+          while [ "$i" -lt 30 ]; do
+            curl -q -4 -sk -o /dev/null --connect-timeout 3 https://1.1.1.1 && v4=1
+            curl -q -6 -sk -o /dev/null --connect-timeout 3 "https://[2606:4700:4700::1111]" && v6=1
+            if [ "$v4" = 1 ] || [ "$v6" = 1 ]; then break; fi
+            i=$((i+1)); sleep 2
           done
 
-          echo "autotune: tier=$TIER mem=${MEM}MB cpu=$CPU zram=$ZRAM swappiness=$SWP" > /run/autotune.status
-          AUTOTUNE
-          chmod +x /etc/local.d/30-autotune.start
+          # Có IPv4 (kể cả khi có cả IPv6) -> ưu tiên IPv4. Chỉ có IPv6 -> dùng IPv6.
+          if [ "$v4" = 1 ]; then
+            CURL=ipv4; WGET="inet4_only = on"; SSHFAM=inet
+          elif [ "$v6" = 1 ]; then
+            CURL=ipv6; WGET="inet6_only = on"; SSHFAM=inet6
+          else
+            echo "netdetect: chua co mang" > /run/netdetect.status
+            exit 0
+          fi
 
-          # Mỗi tuần trả lại block trống cho file VHDX (giúp file nhỏ lại khi tối ưu trên Windows)
-          mkdir -p /etc/periodic/weekly
-          cat > /etc/periodic/weekly/fstrim <<'FSTRIM'
-          #!/bin/sh
-          fstrim / >/dev/null 2>&1
-          fstrim /boot >/dev/null 2>&1
-          exit 0
-          FSTRIM
-          chmod +x /etc/periodic/weekly/fstrim
+          echo "$CURL" > /root/.curlrc
+          echo "$CURL" > /etc/skel/.curlrc
+          touch /etc/wgetrc
+          sed -i '/^inet[46]_only/d' /etc/wgetrc
+          echo "$WGET" >> /etc/wgetrc
+
+          mkdir -p /etc/ssh/ssh_config.d
+          echo "AddressFamily $SSHFAM" > /etc/ssh/ssh_config.d/20-family.conf
+
+          if [ "$v4" = 1 ] && [ "$v6" = 1 ]; then SRV=any
+          elif [ "$v4" = 1 ]; then SRV=inet
+          else SRV=inet6; fi
+          echo "AddressFamily $SRV" > /tmp/sshd-family.new
+          if ! cmp -s /tmp/sshd-family.new /etc/ssh/sshd_config.d/20-family.conf 2>/dev/null; then
+            cp /tmp/sshd-family.new /etc/ssh/sshd_config.d/20-family.conf
+            systemctl --no-block restart ssh
+          fi
+
+          echo "netdetect: v4=$v4 v6=$v6 curl=$CURL ssh=$SSHFAM sshd=$SRV" > /run/netdetect.status
+          EOF
+          sudo chmod +x "$T/usr/local/sbin/netdetect"
+          sudo tee "$T/etc/systemd/system/netdetect.service" >/dev/null <<'EOF'
+          [Unit]
+          Description=Detect IPv4/IPv6 and tune curl/wget/ssh
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/sbin/netdetect
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
 
           # ---------- Lệnh updisk: tự nhận ổ đĩa to hơn rồi mở rộng phân vùng + hệ thống file ----------
-          cat > /usr/local/bin/updisk <<'UPDISK'
+          sudo tee "$T/usr/local/bin/updisk" >/dev/null <<'EOF'
           #!/bin/sh
           # updisk: sau khi tăng dung lượng ổ ảo (Hyper-V: Edit Disk -> Expand), chạy lệnh này.
           set -u
           [ "$(id -u)" = 0 ] || { echo "Cần chạy bằng root"; exit 1; }
 
-          ROOT=$(awk '$2=="/" && $1 ~ /^\/dev\//{d=$1} END{print d}' /proc/mounts)
+          ROOT=$(findmnt -n -o SOURCE /)
           [ -n "$ROOT" ] || { echo "Không xác định được phân vùng gốc"; exit 1; }
           ROOT=$(readlink -f "$ROOT")
           NAME=${ROOT##*/}
@@ -251,17 +273,15 @@ jobs:
           echo "Phân vùng gốc    : $(mb $NAME) MB"
           df -h / | tail -1
 
-          # 1) Mở rộng phân vùng cho hết ổ đĩa
           out=$(growpart "$DISK" "$PARTNUM" 2>&1); rc=$?
           echo "$out"
           if [ "$rc" -ne 0 ] && ! echo "$out" | grep -q NOCHANGE; then
             echo "Mở rộng phân vùng thất bại. Nếu báo hết chỗ, hãy xóa bớt file rồi chạy lại."
             exit 1
           fi
-          partprobe "$DISK" 2>/dev/null
+          partx -u "$DISK" 2>/dev/null
 
-          # 2) Mở rộng hệ thống file cho hết phân vùng (làm được khi đang chạy)
-          FSTYPE=$(blkid -o value -s TYPE "$ROOT")
+          FSTYPE=$(findmnt -n -o FSTYPE /)
           case "$FSTYPE" in
             ext2|ext3|ext4) resize2fs "$ROOT" ;;
             *) echo "Hệ thống file '$FSTYPE' chưa được hỗ trợ"; exit 1 ;;
@@ -270,128 +290,77 @@ jobs:
           echo "---- Kết quả ----"
           echo "Phân vùng gốc    : $(mb $NAME) MB"
           df -h / | tail -1
-          UPDISK
-          chmod +x /usr/local/bin/updisk
+          EOF
+          sudo chmod +x "$T/usr/local/bin/updisk"
 
-          # ---------- Hyper-V: driver disk + mạng vào initramfs ----------
-          if [ "$HYPERV" = "1" ]; then
-            mkdir -p /etc/mkinitfs/features.d
-            printf '%s\n' hv_vmbus hv_storvsc hv_netvsc hv_utils hv_balloon > /etc/mkinitfs/features.d/hyperv.modules
-            if ! grep -q hyperv /etc/mkinitfs/mkinitfs.conf; then
-              sed -i 's/^features="/features="hyperv /' /etc/mkinitfs/mkinitfs.conf
-            fi
-            printf '%s\n' hv_vmbus hv_storvsc hv_netvsc hv_utils >> /etc/modules
-            for k in $(ls /lib/modules); do mkinitfs "$k" || true; done
-          fi
+          # ---------- Nhẹ: log trong RAM, bỏ timer cập nhật, fstrim hàng ngày ----------
+          sudo mkdir -p "$T/etc/systemd/journald.conf.d" "$T/etc/systemd/system/fstrim.timer.d"
+          printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=16M\n' | sudo tee "$T/etc/systemd/journald.conf.d/volatile.conf" >/dev/null
+          printf '[Timer]\nOnCalendar=\nOnCalendar=daily\nPersistent=true\n' | sudo tee "$T/etc/systemd/system/fstrim.timer.d/daily.conf" >/dev/null
 
-          # ---------- Bật dịch vụ ----------
-          rc-update add networking boot   || true
-          rc-update add sshd default      || true
-          rc-update add local default     || true
-          rc-update add crond default     || true
-          rc-update add chronyd default   || true
+          ch systemctl enable systemd-networkd ssh ssh-hostkeys netdetect systemd-timesyncd
+          ch systemctl enable fstrim.timer || echo "CẢNH BÁO: không bật được fstrim.timer"
+          ch systemctl mask apt-daily.timer apt-daily-upgrade.timer || true
+
+          # ---------- Kiểm tra kernel + initramfs ----------
+          ls -l "$T/boot" "$T/vmlinuz" "$T/initrd.img"
+          sudo test -e "$T/vmlinuz" && sudo test -e "$T/initrd.img"
+          echo "---- Driver Hyper-V trong initramfs (nếu rỗng thì có thể đã build sẵn trong kernel) ----"
+          sudo lsinitramfs "$T/initrd.img" | grep -E 'hv_|hyperv' || true
 
           # ---------- Dọn cho nhẹ ----------
-          rm -rf /var/cache/apk/* /tmp/* /mnt/config.env 2>/dev/null || true
+          ch apt-get clean
+          sudo rm -rf "$T"/var/lib/apt/lists/* "$T"/tmp/* "$T"/var/log/*.log "$T/usr/sbin/policy-rc.d"
+          : | sudo tee "$T/etc/machine-id" >/dev/null
+
+          # ---------- Bootloader UEFI: BOOTX64.EFI nhúng sẵn cấu hình, tìm root theo UUID ----------
+          cat > grub-embed.cfg <<EOF
+          set timeout=1
+          search --no-floppy --fs-uuid --set=root $ROOT_UUID
+          menuentry "Debian" {
+            linux /vmlinuz root=UUID=$ROOT_UUID ro quiet console=tty0 net.ifnames=0
+            initrd /initrd.img
+          }
           EOF
-          # bỏ khoảng thụt dòng do heredoc trong YAML
-          sed -i 's/^          //' setup.sh
-          chmod +x setup.sh
-
-      - name: Build image
-        env:
-          BRANCH: ${{ inputs.alpine_branch }}
-          SIZE: ${{ inputs.image_size }}
-          EXTRA: ${{ inputs.extra_packages }}
-          TARGET: ${{ inputs.target }}
-        run: |
-          if [ "$TARGET" = "hyperv-gen2" ]; then BOOT=UEFI; else BOOT=BIOS; fi
-          sudo ./alpine-make-vm-image \
-            --boot-mode "$BOOT" \
-            --image-format raw \
-            --image-size "$SIZE" \
-            --branch "$BRANCH" \
-            --serial-console \
-            --packages "alpine-base openssh chrony busybox-openrc e2fsprogs e2fsprogs-extra cloud-utils-growpart sfdisk parted curl $EXTRA" \
-            --script-chroot \
-            alpine.img \
-            ./setup.sh
-
-          sudo chown "$USER" alpine.img
-          ls -lh alpine.img
-
-      - name: Cài bootloader UEFI vào image (chỉ Gen2)
-        if: ${{ inputs.target == 'hyperv-gen2' }}
-        run: |
-          set -eu
-          sudo apt-get install -y grub-efi-amd64-bin
-
-          LOOP=$(sudo losetup -fP --show alpine.img)
-          sudo parted -s "$LOOP" print
-          ROOT_UUID=$(sudo blkid -s UUID -o value "${LOOP}p2")
-          echo "Root UUID: $ROOT_UUID"
-
-          sudo mkdir -p /mnt/esp
-          sudo mount "${LOOP}p1" /mnt/esp
-
-          # grub.cfg nhúng thẳng vào BOOTX64.EFI: tự tìm phân vùng EFI chứa kernel
-          printf '%s\n' \
-            'set timeout=1' \
-            'search --no-floppy --file /vmlinuz-virt --set=root' \
-            'menuentry "Alpine Linux" {' \
-            "  linux /vmlinuz-virt root=UUID=${ROOT_UUID} rootfstype=ext4 console=tty0" \
-            '  initrd /initramfs-virt' \
-            '}' > grub-embed.cfg
           cat grub-embed.cfg
-
           grub-mkstandalone -O x86_64-efi -o BOOTX64.EFI \
-            --modules="part_gpt part_msdos fat ext2 search search_fs_file normal linux configfile" \
+            --modules="part_gpt part_msdos fat ext2 search search_fs_uuid search_fs_file normal linux configfile" \
             "boot/grub/grub.cfg=grub-embed.cfg"
+          sudo mkdir -p "$T/boot/efi/EFI/BOOT"
+          sudo cp BOOTX64.EFI "$T/boot/efi/EFI/BOOT/BOOTX64.EFI"
+          echo "---- Phân vùng EFI ----"
+          sudo find "$T/boot/efi"
 
-          sudo mkdir -p /mnt/esp/EFI/BOOT
-          sudo cp BOOTX64.EFI /mnt/esp/EFI/BOOT/BOOTX64.EFI
-
-          echo "---- Nội dung phân vùng EFI ----"
-          sudo find /mnt/esp
+          # ---------- Trả block trống để file ảnh thưa, rồi gỡ mount ----------
           sync
-          sudo umount /mnt/esp
+          sudo fstrim -v "$T" || true
+          sudo umount -R "$T"
           sudo losetup -d "$LOOP"
+          LOOP=""
+          ls -lhs debian.img
 
-      - name: Đóng gói theo bản đã chọn
-        env:
-          TARGET: ${{ inputs.target }}
+      - name: Đóng gói VHDX
         run: |
           mkdir -p out
-          if [ "$TARGET" = "img" ]; then
-            xz -9 -T0 -k alpine.img
-            mv alpine.img out/alpine.img
-            mv alpine.img.xz out/alpine.img.xz
-          else
-            qemu-img convert -f raw -O vhdx -o subformat=dynamic alpine.img out/alpine.vhdx
-            ( cd out && zip -9 "alpine-${TARGET}-vhdx.zip" alpine.vhdx )
-          fi
+          qemu-img convert -f raw -O vhdx -o subformat=dynamic debian.img out/debian.vhdx
+          ( cd out && zip -9 debian-hyperv-gen2-vhdx.zip debian.vhdx )
           ls -lh out
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: alpine-${{ inputs.target }}
-          path: |
-            out/alpine.img
-            out/alpine.vhdx
-          compression-level: 6
+          name: debian-hyperv-gen2
+          path: out/debian-hyperv-gen2-vhdx.zip
+          compression-level: 0
 
       - name: Upload Release
         if: ${{ inputs.make_release }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: alpine-${{ inputs.target }}-${{ github.run_number }}
-          name: "Alpine ${{ inputs.target }} #${{ github.run_number }}"
+          tag_name: debian-${{ inputs.debian_suite }}-${{ github.run_number }}
+          name: "Debian ${{ inputs.debian_suite }} Hyper-V Gen2 #${{ github.run_number }}"
           body: |
-            Bản: **${{ inputs.target }}**
-            Hyper-V gen1 = BIOS, gen2 = UEFI (tắt Secure Boot).
-            Root password: `${{ inputs.root_password }}`
+            Debian **${{ inputs.debian_suite }}** tối giản (không GUI), Hyper-V Gen2 (UEFI, tắt Secure Boot).
             Mạng: DHCP tự động, SSH root bật sẵn.
-          files: |
-            out/alpine.img.xz
-            out/*.zip
+            Sau khi tăng ổ đĩa trong Hyper-V, chạy lệnh `updisk` trong VM.
+          files: out/debian-hyperv-gen2-vhdx.zip
