@@ -1,4 +1,4 @@
-name: Build Debian Minimal VHDX (Hyper-V Gen2)
+name: Build Debian Minimal (Hyper-V VHDX / QEMU qcow2)
 
 on:
   workflow_dispatch:
@@ -18,6 +18,21 @@ on:
       extra_packages:
         description: "Gói cài thêm (cách nhau bằng dấu cách)"
         default: "wget nano htop bind9-dnsutils"
+      run_tests:
+        description: "Chạy thử bản sao bằng QEMU (apt update, cài nhiều gói, ghi nặng...) trước khi xuất file"
+        type: boolean
+        default: true
+      test_packages:
+        description: "Gói dùng để thử nghiệm tải nặng (cách nhau bằng dấu cách)"
+        default: "nodejs npm git python3 build-essential nginx"
+      output_format:
+        description: "Định dạng ổ đĩa: vhdx (Hyper-V), qcow2 (QEMU), both (cả hai)"
+        type: choice
+        options:
+          - vhdx
+          - qcow2
+          - both
+        default: vhdx
       make_release:
         description: "Đẩy lên GitHub Release (file .zip)"
         type: boolean
@@ -29,13 +44,13 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Cài công cụ trên runner
         run: |
           sudo apt-get update
-          sudo apt-get install -y debootstrap qemu-utils parted dosfstools e2fsprogs util-linux grub-efi-amd64-bin grub-common zip wget
+          sudo apt-get install -y debootstrap qemu-utils parted dosfstools e2fsprogs util-linux grub-efi-amd64-bin grub-common zip wget qemu-system-x86 ovmf sshpass
 
       - name: Lấy keyring Debian mới nhất
         run: |
@@ -404,6 +419,83 @@ jobs:
           EOF
           sudo chmod +x "$T/usr/local/bin/ipcheck"
 
+          # ---------- Lệnh checkvm: kiểm tra nhanh sức khỏe máy ----------
+          sudo tee "$T/usr/local/bin/checkvm" >/dev/null <<'EOF'
+          #!/bin/sh
+          # checkvm: tổng quan CPU, RAM, swap, ổ đĩa, dịch vụ, mạng và cảnh báo kèm gợi ý lệnh xử lý
+          WARN=0
+          ok()  { echo "  [OK] $*"; }
+          bad() { echo "  [!!] $*"; WARN=$((WARN+1)); }
+
+          . /etc/os-release 2>/dev/null
+          echo "== Hệ thống =="
+          echo "  OS       : ${PRETTY_NAME:-?}"
+          echo "  Kernel   : $(uname -r)"
+          echo "  Hostname : $(hostname)"
+          echo "  Uptime   : $(uptime -p)"
+
+          echo "== CPU =="
+          CPUS=$(nproc)
+          LOAD=$(cut -d' ' -f1 /proc/loadavg)
+          echo "  $CPUS vCPU, tải 1/5/15 phút: $(cut -d' ' -f1-3 /proc/loadavg)"
+          if awk -v l="$LOAD" -v c="$CPUS" 'BEGIN{exit !(l > c*1.5)}'; then
+            bad "CPU đang quá tải (tải $LOAD trên $CPUS vCPU), xem tiến trình bằng: htop"
+          else
+            ok "CPU ổn"
+          fi
+
+          echo "== RAM / Swap =="
+          MEM_T=$(awk '/^MemTotal/{print int($2/1024)}' /proc/meminfo)
+          MEM_A=$(awk '/^MemAvailable/{print int($2/1024)}' /proc/meminfo)
+          SWAP_T=$(awk '/^SwapTotal/{print int($2/1024)}' /proc/meminfo)
+          SWAP_U=$(awk '/^SwapTotal/{t=$2} /^SwapFree/{f=$2} END{print int((t-f)/1024)}' /proc/meminfo)
+          PCT=$(( MEM_A * 100 / MEM_T ))
+          echo "  RAM      : còn trống $MEM_A / $MEM_T MB ($PCT%)"
+          echo "  Swap     : dùng $SWAP_U / $SWAP_T MB"
+          if [ "$PCT" -lt 15 ]; then bad "RAM sắp hết, xem tiến trình ăn RAM bên dưới"; else ok "RAM ổn"; fi
+          if [ "$SWAP_T" -eq 0 ] && [ "$MEM_T" -le 1024 ]; then bad "Chưa có swap trên máy ít RAM, gợi ý chạy: addswap"; fi
+          echo "  Top 5 tiến trình ăn RAM:"
+          ps -eo rss=,comm= --sort=-rss | head -5 | awk '{printf "    %6.0f MB  %s\n", $1/1024, $2}'
+
+          echo "== Ổ đĩa =="
+          set -- $(df -Pm / | awk 'NR==2{print $2, $3, $4, $5}')
+          D_SIZE=$1; D_USED=$2; D_FREE=$3; D_PCT=$(echo "$4" | tr -d '%')
+          echo "  / : dùng $D_USED / $D_SIZE MB ($D_PCT%), còn trống $D_FREE MB"
+          if [ "$D_PCT" -ge 85 ]; then bad "Ổ gần đầy, gợi ý chạy: slim"; else ok "Dung lượng ổ ổn"; fi
+          ROOT=$(readlink -f "$(findmnt -n -o SOURCE /)")
+          NAME=${ROOT##*/}
+          DISKNAME=$(basename "$(readlink -f /sys/class/block/$NAME/.. 2>/dev/null)")
+          PS=$(cat /sys/class/block/$NAME/size 2>/dev/null)
+          PSTART=$(cat /sys/class/block/$NAME/start 2>/dev/null)
+          DS=$(cat /sys/class/block/$DISKNAME/size 2>/dev/null)
+          if [ -n "$PS" ] && [ -n "$PSTART" ] && [ -n "$DS" ]; then
+            TAIL=$(( (DS - PSTART - PS) / 2048 ))
+            if [ "$TAIL" -gt 100 ]; then
+              bad "Ổ ảo còn dư khoảng $TAIL MB chưa dùng, gợi ý chạy: updisk"
+            else
+              ok "Phân vùng đã dùng hết ổ ảo"
+            fi
+          fi
+
+          echo "== Dịch vụ =="
+          FAILED=$(systemctl --failed --no-legend --plain 2>/dev/null)
+          if [ -n "$FAILED" ]; then
+            bad "Có dịch vụ lỗi:"
+            echo "$FAILED" | awk '{print "       " $1}'
+          else
+            ok "Không có dịch vụ lỗi"
+          fi
+
+          echo "== Mạng =="
+          echo "  IP       : $(ip -4 -brief addr show scope global | awk '{print $1" "$3}' | head -1)"
+          if curl -q -4 -sk -o /dev/null --connect-timeout 3 https://1.1.1.1; then ok "IPv4 ra internet được"; else bad "IPv4 không ra internet, chạy: ipcheck"; fi
+          if curl -q -6 -sk -o /dev/null --connect-timeout 3 "https://[2606:4700:4700::1111]"; then ok "IPv6 ra internet được"; else echo "  [--] IPv6 không có (bình thường nếu mạng chỉ có IPv4)"; fi
+
+          echo
+          if [ "$WARN" -eq 0 ]; then echo "Kết luận: máy ổn."; else echo "Kết luận: có $WARN cảnh báo [!!] ở trên."; fi
+          EOF
+          sudo chmod +x "$T/usr/local/bin/checkvm"
+
           # ---------- Nhẹ: log trong RAM, bỏ timer cập nhật, fstrim hàng ngày ----------
           sudo mkdir -p "$T/etc/systemd/journald.conf.d" "$T/etc/systemd/system/fstrim.timer.d"
           printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=16M\n' | sudo tee "$T/etc/systemd/journald.conf.d/volatile.conf" >/dev/null
@@ -429,7 +521,7 @@ jobs:
           set timeout=1
           search --no-floppy --fs-uuid --set=root $ROOT_UUID
           menuentry "Debian" {
-            linux /vmlinuz root=UUID=$ROOT_UUID ro quiet console=tty0 net.ifnames=0
+            linux /vmlinuz root=UUID=$ROOT_UUID ro console=ttyS0,115200 console=tty0 net.ifnames=0
             initrd /initrd.img
           }
           EOF
@@ -450,18 +542,223 @@ jobs:
           LOOP=""
           ls -lhs debian.img
 
-      - name: Đóng gói VHDX
+      - name: Test thật bằng QEMU (chạy trên bản sao, bản gốc giữ sạch)
+        if: ${{ inputs.run_tests }}
+        timeout-minutes: 45
+        env:
+          ROOT_PW: ${{ inputs.root_password }}
+          PKGS: ${{ inputs.test_packages }}
         run: |
+          set -euo pipefail
+          cp --sparse=always debian.img test.img
+          : > serial.log
+
+          # Bật KVM trên runner nếu có, không thì dùng giả lập (chậm hơn nhiều)
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          if [ -w /dev/kvm ]; then
+            ACCEL="-accel kvm -cpu host"; echo "Dùng KVM (nhanh)"
+          else
+            ACCEL="-accel tcg -cpu max"; echo "Không có KVM: chạy giả lập (chậm)"
+          fi
+
+          CODE=$(ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -1)
+          VARS=$(ls /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd 2>/dev/null | head -1)
+          cp "$VARS" vars.fd
+
+          export SSHPASS="$ROOT_PW"
+          SSH_OPTS="-p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15"
+          rsh() { sshpass -e ssh $SSH_OPTS root@127.0.0.1 "$@"; }
+
+          start_vm() {
+            qemu-system-x86_64 $ACCEL -M q35 -m 1024 -smp 2 \
+              -drive if=pflash,format=raw,readonly=on,file="$CODE" \
+              -drive if=pflash,format=raw,file=vars.fd \
+              -drive file=test.img,if=virtio,format=raw \
+              -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22 \
+              -display none -serial file:serial.log -monitor none \
+              -daemonize -pidfile qemu.pid
+          }
+
+          # Chờ VM lên SSH và khác boot_id cũ (để biết đã thật sự khởi động lại)
+          BOOT_ID=""
+          wait_ssh() {
+            OLD="${1:-}"
+            for i in $(seq 1 150); do
+              NEW=$(rsh 'test -s /run/netdetect.status && cat /proc/sys/kernel/random/boot_id' 2>/dev/null) || NEW=""
+              if [ -n "$NEW" ] && [ "$NEW" != "$OLD" ]; then BOOT_ID="$NEW"; return 0; fi
+              sleep 5
+            done
+            echo "VM không lên SSH được sau 12 phút. 60 dòng cuối của serial.log:"
+            tail -60 serial.log
+            return 1
+          }
+
+          stop_vm() {
+            rsh poweroff >/dev/null 2>&1 || true
+            for i in $(seq 1 60); do
+              kill -0 "$(cat qemu.pid)" 2>/dev/null || return 0
+              sleep 2
+            done
+            kill "$(cat qemu.pid)" 2>/dev/null || true
+          }
+
+          # Giãn ổ thêm 2G để thử luôn lệnh updisk
+          truncate -s +2G test.img
+
+          echo "################ LẦN BOOT 1: kiểm tra đầy đủ ################"
+          start_vm
+          wait_ssh ""
+          FIRST_BOOT="$BOOT_ID"
+
+          {
+            printf 'PKGS=%q\n' "$PKGS"
+            cat <<'REMOTE'
+          set -u
+          FAIL=0
+          pass() { echo "[PASS] $*"; }
+          fail() { echo "[FAIL] $*"; FAIL=1; }
+          export DEBIAN_FRONTEND=noninteractive
+
+          echo "== Hệ thống =="
+          uname -a
+          cat /run/netdetect.status
+
+          F=$(systemctl --failed --no-legend --plain)
+          if [ -z "$F" ]; then pass "không có dịch vụ lỗi"; else fail "dịch vụ lỗi: $F"; fi
+          if grep -q 'v4=1' /run/netdetect.status; then pass "mạng IPv4 hoạt động"; else fail "không có IPv4"; fi
+
+          echo "== Kernel có driver Hyper-V không (kiểm tra tĩnh, QEMU không dùng driver này) =="
+          CFG=/boot/config-$(uname -r)
+          IR=/boot/initrd.img-$(uname -r)
+          for k in CONFIG_HYPERV CONFIG_HYPERV_STORAGE CONFIG_HYPERV_NET; do
+            if grep -qE "^$k=(y|m)" "$CFG"; then pass "kernel có $k"; else fail "kernel thiếu $k"; fi
+          done
+          for pair in CONFIG_HYPERV:hv_vmbus CONFIG_HYPERV_STORAGE:hv_storvsc CONFIG_HYPERV_NET:hv_netvsc; do
+            k=${pair%%:*}; m=${pair##*:}
+            if grep -q "^$k=m" "$CFG"; then
+              if lsinitramfs "$IR" | grep -q "$m"; then pass "initramfs có $m"; else fail "initramfs thiếu $m"; fi
+            fi
+          done
+
+          echo "== updisk (ổ vừa được giãn thêm 2G) =="
+          SRC=$(findmnt -n -o SOURCE /)
+          BEFORE=$(blockdev --getsize64 "$SRC")
+          if updisk >/tmp/updisk.log 2>&1; then
+            AFTER=$(blockdev --getsize64 "$SRC")
+            if [ "$AFTER" -gt $((BEFORE + 1500000000)) ]; then
+              pass "updisk mở rộng $((BEFORE/1048576)) -> $((AFTER/1048576)) MB"
+            else
+              cat /tmp/updisk.log; fail "updisk chạy xong nhưng dung lượng không tăng"
+            fi
+          else
+            cat /tmp/updisk.log; fail "updisk báo lỗi"
+          fi
+
+          echo "== apt update + cài nhiều gói: $PKGS =="
+          if apt-get update && apt-get install -y $PKGS; then pass "apt cài gói thành công"; else fail "apt cài gói lỗi"; fi
+          if dpkg --audit | grep -q .; then fail "dpkg còn gói cài dở"; else pass "dpkg sạch"; fi
+
+          echo "== Ghi nặng =="
+          mkdir -p /root/stress
+          ok=1
+          for i in $(seq 1 1500); do
+            dd if=/dev/zero of=/root/stress/f$i bs=64k count=1 conv=fsync status=none || { ok=0; echo "lỗi ở file $i"; break; }
+          done
+          sync
+          rm -rf /root/stress
+          if [ "$ok" = 1 ]; then pass "ghi 1500 file có fsync"; else fail "lỗi khi ghi nhiều file"; fi
+          if dd if=/dev/zero of=/root/big bs=1M count=1024 oflag=direct status=none; then pass "ghi tuần tự 1 GB"; else fail "ghi 1 GB lỗi"; fi
+          rm -f /root/big
+          if fstrim -v / >/dev/null 2>&1; then pass "fstrim"; else fail "fstrim lỗi"; fi
+
+          echo "== Các lệnh tự viết =="
+          if checkvm >/dev/null 2>&1; then pass "checkvm"; else fail "checkvm lỗi"; fi
+          if ipcheck >/dev/null 2>&1; then pass "ipcheck"; else fail "ipcheck lỗi"; fi
+          if addswap 256M >/dev/null 2>&1 && swapon --show | grep -q swapfile; then pass "addswap"; else fail "addswap lỗi"; fi
+          addswap off >/dev/null 2>&1
+
+          echo "== Lỗi I/O trong kernel =="
+          if dmesg | grep -iE 'I/O error|EXT4-fs error|Buffer I/O|blk_update_request|blocked for more than'; then
+            fail "kernel báo lỗi I/O"
+          else
+            pass "dmesg không có lỗi I/O"
+          fi
+
+          echo "KET QUA LAN 1: $([ "$FAIL" = 0 ] && echo DAT || echo KHONG DAT)"
+          exit $FAIL
+          REMOTE
+          } | rsh 'bash -s' | tee test.log
+
+          echo "################ LẦN BOOT 2: khởi động lại, kiểm tra còn ổn ################"
+          rsh 'systemctl reboot' >/dev/null 2>&1 || true
+          sleep 15
+          wait_ssh "$FIRST_BOOT"
+
+          rsh 'bash -s' <<'REMOTE2' | tee -a test.log
+          set -u
+          FAIL=0
+          pass() { echo "[PASS] $*"; }
+          fail() { echo "[FAIL] $*"; FAIL=1; }
+          F=$(systemctl --failed --no-legend --plain)
+          if [ -z "$F" ]; then pass "sau reboot: không có dịch vụ lỗi"; else fail "sau reboot, dịch vụ lỗi: $F"; fi
+          if findmnt -n -o OPTIONS / | grep -qE '(^|,)rw(,|$)'; then pass "/ vẫn mount rw"; else fail "/ bị chuyển sang chỉ-đọc"; fi
+          if dmesg | grep -iE 'I/O error|EXT4-fs error|Buffer I/O|blk_update_request'; then fail "kernel báo lỗi I/O sau reboot"; else pass "dmesg sạch sau reboot"; fi
+          df -h / | tail -1
+          echo "KET QUA LAN 2: $([ "$FAIL" = 0 ] && echo DAT || echo KHONG DAT)"
+          exit $FAIL
+          REMOTE2
+
+          stop_vm
+
+          echo "################ Kiểm tra hệ thống file sau khi test ################"
+          LOOP=$(sudo losetup -fP --show test.img)
+          if sudo e2fsck -fn "${LOOP}p2" | tee -a test.log; then
+            echo "[PASS] e2fsck: hệ thống file sạch" | tee -a test.log
+          else
+            echo "[FAIL] e2fsck báo lỗi" | tee -a test.log
+            sudo losetup -d "$LOOP"
+            exit 1
+          fi
+          sudo losetup -d "$LOOP"
+
+          # Bản test đã cài nhiều thứ nên bỏ đi. File xuất ra ở bước sau vẫn là debian.img sạch.
+          rm -f test.img vars.fd
+          echo "TẤT CẢ BÀI TEST ĐẠT. Bản xuất ra là bản sạch, chưa cài thêm gì."
+
+      - name: Upload log test
+        if: ${{ always() && inputs.run_tests }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-test-logs
+          path: |
+            serial.log
+            test.log
+          if-no-files-found: ignore
+
+      - name: Đóng gói ổ đĩa
+        env:
+          FORMAT: ${{ inputs.output_format }}
+        run: |
+          set -euo pipefail
           mkdir -p out
-          qemu-img convert -f raw -O vhdx -o subformat=dynamic debian.img out/debian.vhdx
-          ( cd out && zip -9 debian-hyperv-gen2-vhdx.zip debian.vhdx )
+          if [ "$FORMAT" = "vhdx" ] || [ "$FORMAT" = "both" ]; then
+            # block_size=1M là mức Microsoft khuyến nghị cho VM Linux (qemu mặc định dùng block lớn hơn nhiều)
+            qemu-img convert -f raw -O vhdx -o subformat=dynamic,block_size=1M debian.img out/debian.vhdx
+            ( cd out && zip -9 debian-hyperv-gen2-vhdx.zip debian.vhdx && rm debian.vhdx )
+          fi
+          if [ "$FORMAT" = "qcow2" ] || [ "$FORMAT" = "both" ]; then
+            qemu-img convert -f raw -O qcow2 debian.img out/debian.qcow2
+            ( cd out && zip -9 debian-qcow2.zip debian.qcow2 && rm debian.qcow2 )
+          fi
           ls -lh out
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: debian-hyperv-gen2
-          path: out/debian-hyperv-gen2-vhdx.zip
+          name: debian-${{ inputs.output_format }}
+          path: out/*.zip
           compression-level: 0
 
       - name: Upload Release
@@ -471,7 +768,8 @@ jobs:
           tag_name: debian-${{ inputs.debian_suite }}-${{ github.run_number }}
           name: "Debian ${{ inputs.debian_suite }} Hyper-V Gen2 #${{ github.run_number }}"
           body: |
-            Debian **${{ inputs.debian_suite }}** tối giản (không GUI), Hyper-V Gen2 (UEFI, tắt Secure Boot).
+            Đã qua bài test (apt update, cài nhiều gói, ghi nặng, reboot, fsck) trước khi xuất file.
+            Debian **${{ inputs.debian_suite }}** tối giản (không GUI), boot UEFI (Hyper-V Gen2: tắt Secure Boot).
             Mạng: DHCP tự động, SSH root bật sẵn.
             Sau khi tăng ổ đĩa trong Hyper-V, chạy lệnh `updisk` trong VM.
-          files: out/debian-hyperv-gen2-vhdx.zip
+          files: out/*.zip
