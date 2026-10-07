@@ -563,8 +563,18 @@ jobs:
             ACCEL="-accel tcg -cpu max"; echo "Không có KVM: chạy giả lập (chậm)"
           fi
 
-          CODE=$(ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -1)
-          VARS=$(ls /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd 2>/dev/null | head -1)
+          # Tìm firmware UEFI (không dùng "ls" vì nó trả mã lỗi 2 khi một file không tồn tại, làm set -e dừng script)
+          CODE=""; VARS=""
+          if [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+          elif [ -f /usr/share/OVMF/OVMF_CODE.fd ]; then CODE=/usr/share/OVMF/OVMF_CODE.fd; fi
+          if [ -f /usr/share/OVMF/OVMF_VARS_4M.fd ]; then VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
+          elif [ -f /usr/share/OVMF/OVMF_VARS.fd ]; then VARS=/usr/share/OVMF/OVMF_VARS.fd; fi
+          if [ -z "$CODE" ] || [ -z "$VARS" ]; then
+            echo "Không tìm thấy firmware OVMF. Nội dung /usr/share/OVMF:"
+            ls -l /usr/share/OVMF || true
+            exit 1
+          fi
+          echo "OVMF: $CODE | $VARS"
           cp "$VARS" vars.fd
 
           export SSHPASS="$ROOT_PW"
