@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+# Tránh việc chương trình đòi quyền admin/UAC làm treo hoặc fail CI
+env:
+  NETCUT_NO_ELEVATE: '1'
+
 jobs:
   # ═══ 1) TEST ═══
   test:
@@ -17,24 +21,26 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
-
-      - name: Debug — xem repo có gì
-        shell: bash
-        run: ls -la
 
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+          cache: false
 
       - name: Init go.mod nếu thiếu
-        shell: bash
         run: |
           if [ ! -f go.mod ]; then
             go mod init netcut
-            echo "⚠️ go.mod thiếu — đã tự init (NHỚ commit go.mod về repo!)"
+            echo "::warning::go.mod thiếu — đã tự init (NHỚ commit go.mod + go.sum về repo!)"
           fi
+
+      - name: Go mod tidy
+        run: go mod tidy
 
       - name: Go vet
         run: go vet ./...
@@ -43,33 +49,35 @@ jobs:
         run: go build ./...
 
       - name: Smoke test
-        shell: bash
         run: |
           go run . version
-          go run . help
+          go run . help || true
 
   # ═══ 2) BUILD WINDOWS ═══
   build-windows:
     name: Build Windows (exe)
     needs: test
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+          cache: false
 
       - name: Init go.mod nếu thiếu
-        shell: bash
         run: |
           if [ ! -f go.mod ]; then
             go mod init netcut
           fi
+          go mod tidy
 
       - name: Determine version
         id: ver
-        shell: bash
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
@@ -79,7 +87,6 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build netcut.exe
-        shell: bash
         run: |
           mkdir -p dist
           go build -trimpath \
@@ -87,9 +94,6 @@ jobs:
             -o dist/netcut.exe .
 
       - name: Test exe
-        shell: bash
-        env:
-          NETCUT_NO_ELEVATE: '1'
         run: ./dist/netcut.exe version
 
       - name: Upload artifact
@@ -110,49 +114,61 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+          cache: false
 
       - name: Init go.mod nếu thiếu
         run: |
           if [ ! -f go.mod ]; then
             go mod init netcut
           fi
+          go mod tidy
 
       - name: Determine version
         id: ver
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
+            DEBVER="${VERSION#v}"
           else
             VERSION="dev-$(date +%Y%m%d)-${GITHUB_SHA::7}"
+            # Version của .deb BẮT BUỘC bắt đầu bằng chữ số, "dev-..." sẽ làm dpkg-deb lỗi
+            DEBVER="0.0.0~dev$(date +%Y%m%d)+${GITHUB_SHA::7}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "debver=$DEBVER" >> "$GITHUB_OUTPUT"
 
       - name: Build linux binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
         run: |
           mkdir -p dist
           go build -trimpath \
             -ldflags "-s -w -X main.version=${{ steps.ver.outputs.version }}" \
             -o dist/netcut-linux-amd64 .
 
+      - name: Test binary
+        run: ./dist/netcut-linux-amd64 version
+
       - name: Build .deb
         run: |
-          V="${{ steps.ver.outputs.version }}"
-          DV="${V#v}"
+          DV="${{ steps.ver.outputs.debver }}"
           mkdir -p pkg/DEBIAN pkg/usr/local/bin
-          cat > pkg/DEBIAN/control <<EOF
-          Package: netcut
-          Version: $DV
-          Section: net
-          Priority: optional
-          Architecture: amd64
-          Maintainer: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>
-          Description: NetCut - Network Access Controller
-           Quan ly thiet bi / cat mang LAN.
-          EOF
+          printf '%s\n' \
+            "Package: netcut" \
+            "Version: ${DV}" \
+            "Section: net" \
+            "Priority: optional" \
+            "Architecture: amd64" \
+            "Maintainer: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>" \
+            "Description: NetCut - Network Access Controller" \
+            " Quan ly thiet bi / cat mang LAN." \
+            > pkg/DEBIAN/control
           cp dist/netcut-linux-amd64 pkg/usr/local/bin/netcut
           chmod 755 pkg/usr/local/bin/netcut
           dpkg-deb --build --root-owner-group pkg "netcut_${DV}_amd64.deb"
-          mv netcut_${DV}_amd64.deb dist/
+          mv "netcut_${DV}_amd64.deb" dist/
           ls -lh dist/
 
       - name: Upload artifact
@@ -204,4 +220,4 @@ jobs:
             sudo apt install ./netcut_*_amd64.deb
             # hoặc:
             sudo install netcut-linux-amd64 /usr/local/bin/netcut
-            
+            ```
