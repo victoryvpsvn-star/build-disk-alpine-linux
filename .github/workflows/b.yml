@@ -8,7 +8,6 @@ on:
 permissions:
   contents: write
 
-# Tránh việc chương trình đòi quyền admin/UAC làm treo hoặc fail CI
 env:
   NETCUT_NO_ELEVATE: '1'
 
@@ -32,24 +31,39 @@ jobs:
           go-version: 'stable'
           cache: false
 
-      - name: Init go.mod nếu thiếu
+      - name: Locate Go source
         run: |
-          if [ ! -f go.mod ]; then
-            go mod init netcut
-            echo "::warning::go.mod thiếu — đã tự init (NHỚ commit go.mod + go.sum về repo!)"
+          echo "== repo root =="; ls -la
+          echo "== go files =="; find . -name '*.go' -not -path './.git/*' | head -50
+          MAIN=$(grep -rl --include='*.go' '^package main' . 2>/dev/null | head -1 || true)
+          if [ -z "$MAIN" ]; then
+            echo "::error::Repo KHÔNG có file .go nào (package main). Chưa commit source? Xem list file ở trên."
+            exit 1
           fi
+          GO_DIR=$(dirname "$MAIN")
+          echo "Found main package in: $GO_DIR"
+          echo "GO_DIR=$GO_DIR" >> "$GITHUB_ENV"
 
-      - name: Go mod tidy
-        run: go mod tidy
+      - name: Prepare go.mod
+        run: |
+          cd "$GO_DIR"
+          case "$(go env GOMOD)" in
+            ""|/dev/null|NUL)
+              go mod init netcut
+              echo "::warning::go.mod thiếu — đã tự init (NHỚ commit go.mod + go.sum!)"
+              ;;
+          esac
+          go mod tidy
 
       - name: Go vet
-        run: go vet ./...
+        run: cd "$GO_DIR" && go vet ./...
 
       - name: Go build
-        run: go build ./...
+        run: cd "$GO_DIR" && go build ./...
 
       - name: Smoke test
         run: |
+          cd "$GO_DIR"
           go run . version
           go run . help || true
 
@@ -69,11 +83,18 @@ jobs:
           go-version: 'stable'
           cache: false
 
-      - name: Init go.mod nếu thiếu
+      - name: Locate Go source
         run: |
-          if [ ! -f go.mod ]; then
-            go mod init netcut
-          fi
+          MAIN=$(grep -rl --include='*.go' '^package main' . 2>/dev/null | head -1 || true)
+          [ -n "$MAIN" ] || { echo "::error::Không tìm thấy package main"; exit 1; }
+          echo "GO_DIR=$(dirname "$MAIN")" >> "$GITHUB_ENV"
+
+      - name: Prepare go.mod
+        run: |
+          cd "$GO_DIR"
+          case "$(go env GOMOD)" in
+            ""|/dev/null|NUL) go mod init netcut ;;
+          esac
           go mod tidy
 
       - name: Determine version
@@ -88,10 +109,12 @@ jobs:
 
       - name: Build netcut.exe
         run: |
-          mkdir -p dist
+          ROOT="$PWD"
+          mkdir -p "$ROOT/dist"
+          cd "$GO_DIR"
           go build -trimpath \
             -ldflags "-s -w -X main.version=${{ steps.ver.outputs.version }}" \
-            -o dist/netcut.exe .
+            -o "$ROOT/dist/netcut.exe" .
 
       - name: Test exe
         run: ./dist/netcut.exe version
@@ -116,11 +139,18 @@ jobs:
           go-version: 'stable'
           cache: false
 
-      - name: Init go.mod nếu thiếu
+      - name: Locate Go source
         run: |
-          if [ ! -f go.mod ]; then
-            go mod init netcut
-          fi
+          MAIN=$(grep -rl --include='*.go' '^package main' . 2>/dev/null | head -1 || true)
+          [ -n "$MAIN" ] || { echo "::error::Không tìm thấy package main"; exit 1; }
+          echo "GO_DIR=$(dirname "$MAIN")" >> "$GITHUB_ENV"
+
+      - name: Prepare go.mod
+        run: |
+          cd "$GO_DIR"
+          case "$(go env GOMOD)" in
+            ""|/dev/null|NUL) go mod init netcut ;;
+          esac
           go mod tidy
 
       - name: Determine version
@@ -131,7 +161,6 @@ jobs:
             DEBVER="${VERSION#v}"
           else
             VERSION="dev-$(date +%Y%m%d)-${GITHUB_SHA::7}"
-            # Version của .deb BẮT BUỘC bắt đầu bằng chữ số, "dev-..." sẽ làm dpkg-deb lỗi
             DEBVER="0.0.0~dev$(date +%Y%m%d)+${GITHUB_SHA::7}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -143,10 +172,12 @@ jobs:
           GOOS: linux
           GOARCH: amd64
         run: |
-          mkdir -p dist
+          ROOT="$PWD"
+          mkdir -p "$ROOT/dist"
+          cd "$GO_DIR"
           go build -trimpath \
             -ldflags "-s -w -X main.version=${{ steps.ver.outputs.version }}" \
-            -o dist/netcut-linux-amd64 .
+            -o "$ROOT/dist/netcut-linux-amd64" .
 
       - name: Test binary
         run: ./dist/netcut-linux-amd64 version
