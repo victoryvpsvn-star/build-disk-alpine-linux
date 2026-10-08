@@ -1,0 +1,302 @@
+# ═══════════════════════════════════════════════════════════════════
+#  NETCUT — Auto Build & Release
+#  Push tag v1.x.x → Test (Ubuntu + Windows) → Build exe/deb/tar.gz
+#  → Tự tạo GitHub Release kèm full file + checksum
+# ═══════════════════════════════════════════════════════════════════
+
+name: Build & Release
+
+on:
+  push:
+    tags: ['v*']           # git tag v1.0.0 && git push origin v1.0.0
+  workflow_dispatch:        # nút "Run workflow" để test tay
+
+permissions:
+  contents: write           # cần quyền tạo Release
+
+env:
+  GO_VERSION: '1.22'
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════
+  # 1) TEST — bash syntax + compile Go trên CẢ Ubuntu & Windows
+  # ═══════════════════════════════════════════════════════════════
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------- Bash ----------
+      - name: Bash syntax check
+        shell: bash
+        run: |
+          bash -n netcut.sh
+          bash -n install.sh
+          echo "✅ Bash syntax OK"
+
+      - name: Bash smoke test (netcut.sh help)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq iputils-arping    # check_deps của netcut.sh cần
+          chmod +x netcut.sh
+          ./netcut.sh help > /dev/null
+          echo "✅ Bash help OK"
+
+      - name: Shellcheck (tham khảo, không chặn build)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning netcut.sh install.sh || true
+
+      # ---------- Go ----------
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go build check
+        run: go build ./...
+
+      - name: Go smoke test (help + version, không cần admin)
+        shell: bash
+        run: |
+          go run . help > /dev/null
+          go run . version
+          echo "✅ Go smoke OK"
+
+  # ═══════════════════════════════════════════════════════════════
+  # 2) BUILD WINDOWS — netcut.exe (1 file, double-click là chạy)
+  # ═══════════════════════════════════════════════════════════════
+  build-windows:
+    name: Build Windows (exe)
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Determine version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="v0.0.0-dev.$(date +%Y%m%d)-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "🔧 Version: $VERSION"
+
+      - name: Build netcut.exe
+        shell: bash
+        run: |
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.ver.outputs.version }}" \
+            -o dist/netcut.exe .
+          ls -lh dist/
+
+      - name: Smoke test exe
+        shell: bash
+        env:
+          NETCUT_NO_ELEVATE: '1'     # chặn UAC khi chạy trên CI
+        run: |
+          ./dist/netcut.exe version
+          ./dist/netcut.exe help | head -5
+          echo "✅ exe chạy OK"
+
+      - name: SHA256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\netcut.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  netcut.exe" | Out-File dist\netcut.exe.sha256 -Encoding ascii
+          Get-Content dist\netcut.exe.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows
+          path: dist/*
+          retention-days: 30
+          if-no-files-found: error
+
+  # ═══════════════════════════════════════════════════════════════
+  # 3) BUILD LINUX — .deb + tar.gz (bản bash) + binary Go
+  # ═══════════════════════════════════════════════════════════════
+  build-linux:
+    name: Build Linux (deb + tar.gz)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Determine version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="v0.0.0-dev.$(date +%Y%m%d)-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "🔧 Version: $VERSION"
+
+      - name: Build Go binary cho Linux (bonus — 1 file không cần bash)
+        run: |
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.ver.outputs.version }}" \
+            -o dist/netcut-linux-amd64 .
+
+      - name: Package tar.gz (bản bash script)
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          DIRNAME="netcut-${VERSION}"
+          mkdir -p "$DIRNAME"
+          cp netcut.sh install.sh config.conf "$DIRNAME/"
+          [ -f README.md ] && cp README.md "$DIRNAME/"
+          chmod +x "$DIRNAME/netcut.sh" "$DIRNAME/install.sh"
+          tar -czf "netcut-${VERSION}.tar.gz" "$DIRNAME"
+
+      - name: Build .deb
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          DEB_VER="${VERSION#v}"
+
+          mkdir -p pkg/DEBIAN pkg/usr/local/bin pkg/etc/netcut pkg/usr/share/doc/netcut
+
+          cat > pkg/DEBIAN/control <<EOF
+          Package: netcut
+          Version: $DEB_VER
+          Section: net
+          Priority: optional
+          Architecture: all
+          Maintainer: ${GITHUB_ACTOR} <${GITHUB_ACTOR}@users.noreply.github.com>
+          Depends: iptables, iproute2, iputils-arping, cron | cron-daemon
+          Description: NetCut - Network Access Controller
+           Tool quan ly / cat mang LAN cho Debian.
+           Cut theo IP, MAC, port, hen gio, whitelist/blacklist.
+          EOF
+
+          cat > pkg/DEBIAN/postinst <<'EOF'
+          #!/bin/bash
+          mkdir -p /etc/netcut
+          touch /etc/netcut/whitelist.conf
+          chmod 644 /etc/netcut/whitelist.conf
+          echo "netcut installed. Edit config in /etc/netcut/"
+          EOF
+          chmod 755 pkg/DEBIAN/postinst
+
+          cp netcut.sh pkg/usr/local/bin/netcut
+          chmod +x pkg/usr/local/bin/netcut
+          cp config.conf pkg/etc/netcut/config.conf
+          [ -f README.md ] && cp README.md pkg/usr/share/doc/netcut/
+
+          dpkg-deb --build --root-owner-group pkg "netcut_${DEB_VER}_all.deb"
+
+      - name: Collect artifacts
+        run: |
+          mv netcut-*.tar.gz netcut_*_all.deb dist/
+          ls -lh dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          path: dist/*
+          retention-days: 30
+          if-no-files-found: error
+
+  # ═══════════════════════════════════════════════════════════════
+  # 4) RELEASE — gom tất cả, chỉ chạy khi push tag v*
+  # ═══════════════════════════════════════════════════════════════
+  release:
+    name: GitHub Release
+    needs: [build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download tất cả artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate SHA256SUMS cho tất cả file
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Liệt kê file sẽ release
+        run: ls -lh dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true     # tự sinh changelog từ commits
+          files: dist/*
+          body: |
+            ## 📦 NetCut ${{ github.ref_name }}
+
+            ### 🪟 Windows
+            Tải `netcut.exe` → double-click → bấm **Yes** khi UAC hỏi quyền.
+            Quét mạng, hiện full list thiết bị (nhận diện LG TV, iPhone, ...), gõ số để cắt.
+
+            ```powershell
+            .\netcut.exe scan
+            .\netcut.exe cut-ip 192.168.1.100 "ly do"
+            .\netcut.exe restore-all
+            ```
+
+            ### 🐧 Debian 13
+
+            **Cách 1 — .deb (khuyên dùng):**
+            ```bash
+            sudo apt install ./netcut_*_all.deb
+            ```
+
+            **Cách 2 — bash script:**
+            ```bash
+            tar -xzf netcut-*.tar.gz && cd netcut-*/
+            sudo bash install.sh
+            ```
+
+            **Cách 3 — binary Go (1 file, không cần bash):**
+            ```bash
+            sudo install netcut-linux-amd64 /usr/local/bin/netcut
+            sudo netcut scan
+            ```
+
+            ### ✅ Kiểm tra checksum
+            ```bash
+            sha256sum -c SHA256SUMS.txt     # Linux
+            ```
+            ```powershell
+            Get-FileHash netcut.exe -Algorithm SHA256    # Windows
+            ```
+
+            > ⚠️ Tool cắt bằng firewall của máy nó chạy. Muốn cắt cả LAN →
+            > chạy trên máy gateway, hoặc dùng netcut.sh trên Debian.
