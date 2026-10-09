@@ -24,7 +24,7 @@ jobs:
         continue-on-error: true
         run: |
           New-VHD -Path "$PWD\t.vhdx" -SizeBytes 1GB -Dynamic
-          New-VM -Name probe -Generation 2 -MemoryStartupBytes 512MB -VHDPath "$PWD\t.vhdx" -NoVHD:$false
+          New-VM -Name probe -Generation 2 -MemoryStartupBytes 512MB -VHDPath "$PWD\t.vhdx"
           Set-VMFirmware -VMName probe -EnableSecureBoot Off
           Start-VM -Name probe
           Start-Sleep 15
