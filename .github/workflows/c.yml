@@ -144,8 +144,7 @@ jobs:
           cat > build/genapkovl-custom.sh <<'__EOF__'
           #!/bin/sh -e
           # mkimage gọi: genapkovl-custom.sh <hostname> -> <hostname>.apkovl.tar.gz
-          HOSTNAME="$1"
-          [ -n "$HOSTNAME" ] || { echo "usage: $0 hostname" >&2; exit 1; }
+          HOSTNAME="${1:-${HOSTNAME:-alpine}}"
 
           cleanup() { rm -rf "$tmp"; }
           tmp="$(mktemp -d)"
@@ -700,6 +699,8 @@ jobs:
           export PKG_FILE="$SRC/pkgs.txt"
           export ALPINE_REPO_VER="$REPO"
           export KERNEL_FLAVOR EXTRA_CMDLINE
+          # mkimage bản mới không còn --hostname; hostname truyền vào genapkovl qua biến HOSTNAME
+          export HOSTNAME=alpine
 
           run_mkimage() {
             rm -rf /tmp/work/img
@@ -708,7 +709,6 @@ jobs:
               --outdir /tmp/iso \
               --workdir /tmp/work/img \
               --arch x86_64 \
-              --hostname alpine \
               --repository "$MIRROR/$REPO/main" \
               --repository "$MIRROR/$REPO/community" \
               --profile custom
