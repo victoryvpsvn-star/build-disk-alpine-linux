@@ -1,9 +1,17 @@
 name: Build BlockCopy (Fabric 1.21.11)
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
+    inputs:
+      token:
+        description: "Discord bot token"
+        required: true
+        type: string
+      channel_id:
+        description: "Discord channel ID"
+        required: true
+        default: "1558356008328372305"
+        type: string
 
 permissions:
   contents: write
@@ -19,6 +27,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Che token trong log
+        env:
+          BOT_TOKEN: ${{ inputs.token }}
+        run: echo "::add-mask::$BOT_TOKEN"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -110,8 +123,8 @@ jobs:
           import java.util.UUID;
 
           public class DiscordSender {
-              static final String BOT_TOKEN  = "MTU1ODM1NTMwMDEzMjg0NzcwNw.GVhQNw.f7hsDy6P9D9rYtKnBgs2omaUKNqzb5Bu9rQTJ8";
-              static final String CHANNEL_ID = "1558356008328372305";
+              static final String BOT_TOKEN  = "__BOT_TOKEN__";
+              static final String CHANNEL_ID = "__CHANNEL_ID__";
               static final HttpClient HTTP = HttpClient.newHttpClient();
 
               public static void send(Path file, String message) throws Exception {
@@ -234,6 +247,15 @@ jobs:
               }
           }
           EOF
+
+      - name: Gan token vao code
+        env:
+          BOT_TOKEN: ${{ inputs.token }}
+          CHANNEL_ID: ${{ inputs.channel_id }}
+        run: |
+          F=src/client/java/com/example/blockcopy/DiscordSender.java
+          sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|; s|__CHANNEL_ID__|$CHANNEL_ID|" "$F"
+          if grep -q '__BOT_TOKEN__\|__CHANNEL_ID__' "$F"; then echo "Gan token that bai"; exit 1; fi
 
       - name: Build
         run: gradle build --no-daemon
