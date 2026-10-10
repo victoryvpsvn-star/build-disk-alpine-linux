@@ -154,12 +154,18 @@ jobs:
           package com.example.blockcopy;
 
           import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
           import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
           import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
           import net.minecraft.client.MinecraftClient;
           import net.minecraft.client.option.KeyBinding;
           import net.minecraft.client.render.Camera;
+          import net.minecraft.block.BlockState;
           import net.minecraft.client.world.ClientWorld;
+          import net.minecraft.world.chunk.WorldChunk;
+          import net.minecraft.entity.EntityType;
+          import net.minecraft.entity.decoration.ArmorStandEntity;
           import net.minecraft.text.Text;
           import net.minecraft.util.Identifier;
           import net.minecraft.util.hit.*;
@@ -173,8 +179,42 @@ jobs:
           import java.util.zip.GZIPOutputStream;
 
           public class BlockCopyClient implements ClientModInitializer {
-              static KeyBinding keyA, keyB, keySend;
+              static KeyBinding keyA, keyB, keySend, keyFree;
               static BlockPos a, b;
+
+              // ---- cache chunk: nho moi chunk tung tai, ke ca khi client da bo no ----
+              static final LinkedHashMap<Long, WorldChunk> CACHE = new LinkedHashMap<>() {
+                  @Override protected boolean removeEldestEntry(Map.Entry<Long, WorldChunk> e) { return size() > 4000; }
+              };
+              static ClientWorld cachedWorld;
+              static long lastSendMs;
+
+              static BlockState stateAt(ClientWorld w, BlockPos p) {
+                  WorldChunk c = CACHE.get(ChunkPos.toLong(p.getX() >> 4, p.getZ() >> 4));
+                  return c != null ? c.getBlockState(p) : w.getBlockState(p);
+              }
+
+              static int missingChunks(BlockBox box) {
+                  int miss = 0;
+                  for (int cx = box.getMinX() >> 4; cx <= box.getMaxX() >> 4; cx++)
+                      for (int cz = box.getMinZ() >> 4; cz <= box.getMaxZ() >> 4; cz++)
+                          if (!CACHE.containsKey(ChunkPos.toLong(cx, cz))) miss++;
+                  return miss;
+              }
+
+              static void info(MinecraftClient mc) {
+                  if (a == null || b == null) return;
+                  BlockBox box = BlockBox.create(a, b);
+                  int total = ((box.getMaxX() >> 4) - (box.getMinX() >> 4) + 1) * ((box.getMaxZ() >> 4) - (box.getMinZ() >> 4) + 1);
+                  msg(mc, "Hop " + box.getBlockCountX() + "x" + box.getBlockCountY() + "x" + box.getBlockCountZ()
+                      + " | chunk chua tai: " + missingChunks(box) + "/" + total);
+              }
+
+              // ---- freecam ----
+              static boolean free = false;
+              static ArmorStandEntity cam;
+              static long lastNs;
+              static float savedYaw, savedPitch;
 
               @Override
               public void onInitializeClient() {
@@ -182,14 +222,36 @@ jobs:
                   keyA    = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.a",    GLFW.GLFW_KEY_Z, cat));
                   keyB    = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.b",    GLFW.GLFW_KEY_X, cat));
                   keySend = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.send", GLFW.GLFW_KEY_C, cat));
+                  keyFree = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.free", GLFW.GLFW_KEY_V, cat));
+
+                  ClientChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
+                      if (world != cachedWorld) { CACHE.clear(); cachedWorld = world; }
+                      CACHE.put(ChunkPos.toLong(chunk.getPos().x, chunk.getPos().z), chunk);
+                  });
+
+                  // chan phim di chuyen / click cua nhan vat that khi dang freecam
+                  ClientTickEvents.START_CLIENT_TICK.register(mc -> { if (free) lockInput(mc); });
+
+                  // cap nhat camera moi frame cho muot
+                  HudRenderCallback.EVENT.register((ctx, tickCounter) -> frame(MinecraftClient.getInstance()));
 
                   ClientTickEvents.END_CLIENT_TICK.register(mc -> {
-                      if (mc.world == null) return;
-                      while (keyA.wasPressed()) { BlockPos p = pick(mc); if (p != null) { a = p; msg(mc, "A = " + p.toShortString()); } }
-                      while (keyB.wasPressed()) { BlockPos p = pick(mc); if (p != null) { b = p; msg(mc, "B = " + p.toShortString()); } }
+                      if (mc.world == null || mc.player == null) { free = false; cam = null; return; }
+
+                      while (keyFree.wasPressed()) toggleFree(mc);
+
+                      while (keyA.wasPressed()) { BlockPos p = pick(mc); if (p != null) { a = p; msg(mc, "A = " + p.toShortString()); info(mc); } }
+                      while (keyB.wasPressed()) { BlockPos p = pick(mc); if (p != null) { b = p; msg(mc, "B = " + p.toShortString()); info(mc); } }
                       while (keySend.wasPressed()) {
                           if (a == null || b == null) { msg(mc, "Chua chon du A va B"); continue; }
                           BlockBox box = BlockBox.create(a, b);
+                          int miss = missingChunks(box);
+                          long nowMs = System.currentTimeMillis();
+                          if (miss > 0 && nowMs - lastSendMs > 4000) {
+                              lastSendMs = nowMs;
+                              msg(mc, "Con " + miss + " chunk chua tai. Di bo lai gan do roi bam C lai. Bam C them 1 lan trong 4s de gui bat chap.");
+                              continue;
+                          }
                           Path f = export(mc.world, box);
                           msg(mc, "Dang gui " + f.getFileName() + "...");
                           new Thread(() -> {
@@ -204,10 +266,74 @@ jobs:
                   });
               }
 
+              static void toggleFree(MinecraftClient mc) {
+                  if (!free) {
+                      cam = new ArmorStandEntity(EntityType.ARMOR_STAND, mc.world);
+                      Vec3d eye = mc.player.getEyePos();
+                      float yaw = mc.player.getYaw(), pitch = mc.player.getPitch();
+                      cam.refreshPositionAndAngles(eye.x, eye.y, eye.z, yaw, pitch);
+                      double off = cam.getEyeY() - cam.getY();
+                      cam.refreshPositionAndAngles(eye.x, eye.y - off, eye.z, yaw, pitch);
+                      savedYaw = yaw; savedPitch = pitch;
+                      mc.setCameraEntity(cam);
+                      lastNs = System.nanoTime();
+                      free = true;
+                      msg(mc, "Freecam BAT: WASD bay, Space len, Shift xuong, Ctrl nhanh. V de tat");
+                  } else {
+                      mc.setCameraEntity(mc.player);
+                      mc.player.setYaw(savedYaw);
+                      mc.player.setPitch(savedPitch);
+                      free = false;
+                      cam = null;
+                      msg(mc, "Freecam TAT");
+                  }
+              }
+
+              static void lockInput(MinecraftClient mc) {
+                  var o = mc.options;
+                  KeyBinding[] ks = { o.forwardKey, o.backKey, o.leftKey, o.rightKey, o.jumpKey, o.sneakKey,
+                                      o.sprintKey, o.attackKey, o.useKey, o.pickItemKey };
+                  for (KeyBinding k : ks) {
+                      k.setPressed(false);
+                      while (k.wasPressed()) { }
+                  }
+              }
+
+              static boolean down(long w, int key) { return GLFW.glfwGetKey(w, key) == GLFW.GLFW_PRESS; }
+
+              static void frame(MinecraftClient mc) {
+                  if (!free || cam == null || mc.player == null) return;
+                  long now = System.nanoTime();
+                  double dt = Math.min((now - lastNs) / 1e9, 0.1);
+                  lastNs = now;
+
+                  float yaw = mc.player.getYaw(), pitch = mc.player.getPitch();
+                  double x = cam.getX(), y = cam.getY(), z = cam.getZ();
+
+                  if (mc.currentScreen == null) {
+                      long w = mc.getWindow().getHandle();
+                      Vec3d f = Vec3d.fromPolar(pitch, yaw);
+                      Vec3d r = Vec3d.fromPolar(0f, yaw + 90f);
+                      Vec3d mv = Vec3d.ZERO;
+                      if (down(w, GLFW.GLFW_KEY_W)) mv = mv.add(f);
+                      if (down(w, GLFW.GLFW_KEY_S)) mv = mv.subtract(f);
+                      if (down(w, GLFW.GLFW_KEY_D)) mv = mv.add(r);
+                      if (down(w, GLFW.GLFW_KEY_A)) mv = mv.subtract(r);
+                      if (down(w, GLFW.GLFW_KEY_SPACE)) mv = mv.add(0, 1, 0);
+                      if (down(w, GLFW.GLFW_KEY_LEFT_SHIFT)) mv = mv.subtract(0, 1, 0);
+                      if (mv.lengthSquared() > 0) {
+                          double speed = (down(w, GLFW.GLFW_KEY_LEFT_CONTROL) ? 40.0 : 12.0) * dt;
+                          mv = mv.normalize().multiply(speed);
+                          x += mv.x; y += mv.y; z += mv.z;
+                      }
+                  }
+                  cam.refreshPositionAndAngles(x, y, z, yaw, pitch);
+              }
+
               static BlockPos pick(MinecraftClient mc) {
-                  Camera cam = mc.gameRenderer.getCamera();
-                  Vec3d start = cam.getCameraPos();
-                  Vec3d dir = Vec3d.fromPolar(cam.getPitch(), cam.getYaw());
+                  Camera c = mc.gameRenderer.getCamera();
+                  Vec3d start = c.getCameraPos();
+                  Vec3d dir = Vec3d.fromPolar(c.getPitch(), c.getYaw());
                   Vec3d end = start.add(dir.multiply(256));
                   BlockHitResult hit = mc.world.raycast(new RaycastContext(start, end,
                       RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, mc.player));
@@ -221,7 +347,7 @@ jobs:
                   for (int y = box.getMinY(); y <= box.getMaxY(); y++)
                     for (int z = box.getMinZ(); z <= box.getMaxZ(); z++)
                       for (int x = box.getMinX(); x <= box.getMaxX(); x++) {
-                          String id = w.getBlockState(p.set(x, y, z)).toString();
+                          String id = stateAt(w, p.set(x, y, z)).toString();
                           int idx = palette.computeIfAbsent(id, k -> palette.size());
                           data.append(idx).append(',');
                       }
@@ -276,5 +402,5 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: BlockCopy build ${{ github.run_number }} (Fabric 1.21.11)
-          body: "Phim: Z = goc A, X = goc B, C = gui Discord. Can Fabric API + Freecam."
+          body: "Phim: V = freecam, Z = goc A, X = goc B, C = gui Discord. Mod nho chunk da tai, canh bao chunk thieu. Chi can Fabric API."
           files: ${{ steps.jar.outputs.path }}
