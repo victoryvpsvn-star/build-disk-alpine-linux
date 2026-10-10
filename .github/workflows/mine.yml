@@ -26,7 +26,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.14.3"
+          gradle-version: "9.2.0"
 
       - name: Tao project
         run: |
@@ -110,7 +110,7 @@ jobs:
           import java.util.UUID;
 
           public class DiscordSender {
-              static final String BOT_TOKEN  = "MTU1ODM1NTMwMDEzMjg0NzcwNw.G39e-h.7mPBGcNaa531OgIdDl3-bclbowegJGOLlDIcbw";
+              static final String BOT_TOKEN  = "MTU1ODM1NTMwMDEzMjg0NzcwNw.GVhQNw.f7hsDy6P9D9rYtKnBgs2omaUKNqzb5Bu9rQTJ8";
               static final String CHANNEL_ID = "1558356008328372305";
               static final HttpClient HTTP = HttpClient.newHttpClient();
 
