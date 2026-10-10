@@ -159,6 +159,7 @@ jobs:
           import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
           import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
           import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
           import net.minecraft.client.option.KeyBinding;
           import net.minecraft.client.render.Camera;
           import net.minecraft.block.BlockState;
@@ -179,7 +180,7 @@ jobs:
           import java.util.zip.GZIPOutputStream;
 
           public class BlockCopyClient implements ClientModInitializer {
-              static KeyBinding keyA, keyB, keySend, keyFree;
+              static KeyBinding keySend, keyFree;
               static BlockPos a, b;
 
               // ---- cache chunk: nho moi chunk tung tai, ke ca khi client da bo no ----
@@ -207,64 +208,124 @@ jobs:
                   BlockBox box = BlockBox.create(a, b);
                   int total = ((box.getMaxX() >> 4) - (box.getMinX() >> 4) + 1) * ((box.getMaxZ() >> 4) - (box.getMinZ() >> 4) + 1);
                   msg(mc, "Hop " + box.getBlockCountX() + "x" + box.getBlockCountY() + "x" + box.getBlockCountZ()
-                      + " | chunk chua tai: " + missingChunks(box) + "/" + total);
+                      + " | chunk chua tai: " + missingChunks(box) + "/" + total + " (chunk thieu hien do tren man hinh)");
               }
 
-              // ---- freecam ----
+              // ================= ESP (ve len HUD bang phep chieu 3D -> 2D) =================
+              static Vec3d pPos = Vec3d.ZERO, pF = Vec3d.ZERO, pR = Vec3d.ZERO, pU = Vec3d.ZERO;
+              static double pScale;
+              static int pW, pH;
+              static final List<int[]> missingList = new ArrayList<>();
+              static int missTotal, missTick;
+              static final int MAX_ESP_CHUNKS = 16;
+
+              static void refreshMissing(BlockBox box) {
+                  missingList.clear();
+                  List<int[]> all = new ArrayList<>();
+                  for (int cx = box.getMinX() >> 4; cx <= box.getMaxX() >> 4; cx++)
+                      for (int cz = box.getMinZ() >> 4; cz <= box.getMaxZ() >> 4; cz++)
+                          if (!CACHE.containsKey(ChunkPos.toLong(cx, cz))) all.add(new int[]{cx, cz});
+                  missTotal = all.size();
+                  final Vec3d cp = pPos;
+                  all.sort(Comparator.comparingDouble((int[] ch) -> {
+                      double dx = ch[0] * 16 + 8 - cp.x, dz = ch[1] * 16 + 8 - cp.z;
+                      return dx * dx + dz * dz;
+                  }));
+                  for (int i = 0; i < Math.min(MAX_ESP_CHUNKS, all.size()); i++) missingList.add(all.get(i));
+              }
+
+              static double[] project(Vec3d p) {
+                  Vec3d d = p.subtract(pPos);
+                  double z = d.dotProduct(pF);
+                  if (z < 0.05) return null;
+                  return new double[]{ pW / 2.0 + d.dotProduct(pR) / z * pScale, pH / 2.0 - d.dotProduct(pU) / z * pScale };
+              }
+
+              static void line(DrawContext g, Vec3d p1, Vec3d p2, int col) {
+                  Vec3d d1 = p1.subtract(pPos), d2 = p2.subtract(pPos);
+                  double z1 = d1.dotProduct(pF), z2 = d2.dotProduct(pF);
+                  final double NEAR = 0.05;
+                  if (z1 < NEAR && z2 < NEAR) return;
+                  if (z1 < NEAR) { double t = (NEAR - z1) / (z2 - z1); d1 = d1.add(d2.subtract(d1).multiply(t)); z1 = NEAR; }
+                  else if (z2 < NEAR) { double t = (NEAR - z2) / (z1 - z2); d2 = d2.add(d1.subtract(d2).multiply(t)); z2 = NEAR; }
+                  double x1 = pW / 2.0 + d1.dotProduct(pR) / z1 * pScale, y1 = pH / 2.0 - d1.dotProduct(pU) / z1 * pScale;
+                  double x2 = pW / 2.0 + d2.dotProduct(pR) / z2 * pScale, y2 = pH / 2.0 - d2.dotProduct(pU) / z2 * pScale;
+
+                  // cat doan thang theo khung man hinh (Liang-Barsky)
+                  double t0 = 0, t1 = 1, dx = x2 - x1, dy = y2 - y1;
+                  double[] pp = { -dx, dx, -dy, dy };
+                  double[] qq = { x1, pW - x1, y1, pH - y1 };
+                  for (int i = 0; i < 4; i++) {
+                      if (pp[i] == 0) { if (qq[i] < 0) return; }
+                      else {
+                          double r = qq[i] / pp[i];
+                          if (pp[i] < 0) { if (r > t1) return; if (r > t0) t0 = r; }
+                          else { if (r < t0) return; if (r < t1) t1 = r; }
+                      }
+                  }
+                  double sx = x1 + t0 * dx, sy = y1 + t0 * dy, ex = x1 + t1 * dx, ey = y1 + t1 * dy;
+                  double len = Math.hypot(ex - sx, ey - sy);
+                  int steps = Math.max(1, (int) (len / 4));
+                  for (int i = 0; i <= steps; i++) {
+                      double t = i / (double) steps;
+                      int px = (int) (sx + (ex - sx) * t), py = (int) (sy + (ey - sy) * t);
+                      g.fill(px - 1, py - 1, px + 1, py + 1, col);
+                  }
+              }
+
+              static void cuboid(DrawContext g, double x1, double y1, double z1, double x2, double y2, double z2, int col) {
+                  Vec3d[] v = {
+                      new Vec3d(x1, y1, z1), new Vec3d(x2, y1, z1), new Vec3d(x2, y1, z2), new Vec3d(x1, y1, z2),
+                      new Vec3d(x1, y2, z1), new Vec3d(x2, y2, z1), new Vec3d(x2, y2, z2), new Vec3d(x1, y2, z2)
+                  };
+                  for (int i = 0; i < 4; i++) {
+                      line(g, v[i], v[(i + 1) % 4], col);
+                      line(g, v[i + 4], v[(i + 1) % 4 + 4], col);
+                      line(g, v[i], v[i + 4], col);
+                  }
+              }
+
+              static void drawEsp(DrawContext g, MinecraftClient mc) {
+                  if (a == null && b == null) return;
+                  Camera c = mc.gameRenderer.getCamera();
+                  pPos = c.getCameraPos();
+                  pF = Vec3d.fromPolar(c.getPitch(), c.getYaw());
+                  pR = Vec3d.fromPolar(0f, c.getYaw() + 90f);
+                  pU = pR.crossProduct(pF);
+                  pW = g.getScaledWindowWidth();
+                  pH = g.getScaledWindowHeight();
+                  double fov = mc.options.getFov().getValue();
+                  pScale = (pH / 2.0) / Math.tan(Math.toRadians(fov / 2.0));
+
+                  if (a != null) cuboid(g, a.getX(), a.getY(), a.getZ(), a.getX() + 1, a.getY() + 1, a.getZ() + 1, 0xFFFFFF00);
+                  if (b != null) cuboid(g, b.getX(), b.getY(), b.getZ(), b.getX() + 1, b.getY() + 1, b.getZ() + 1, 0xFF00FFFF);
+                  if (a == null || b == null) return;
+
+                  BlockBox box = BlockBox.create(a, b);
+                  cuboid(g, box.getMinX(), box.getMinY(), box.getMinZ(), box.getMaxX() + 1, box.getMaxY() + 1, box.getMaxZ() + 1, 0xFF55FF55);
+
+                  if (missTick++ % 10 == 0) refreshMissing(box);
+                  for (int[] ch : missingList) {
+                      int x0 = ch[0] * 16, z0 = ch[1] * 16;
+                      cuboid(g, x0, box.getMinY(), z0, x0 + 16, box.getMaxY() + 1, z0 + 16, 0xFFFF3333);
+                      double[] s = project(new Vec3d(x0 + 8, box.getMaxY() + 1, z0 + 8));
+                      if (s != null)
+                          g.drawTextWithShadow(mc.textRenderer, "THIEU " + ch[0] + "," + ch[1], (int) s[0] - 24, (int) s[1], 0xFFFF5555);
+                  }
+                  String t = "BlockCopy: " + box.getBlockCountX() + "x" + box.getBlockCountY() + "x" + box.getBlockCountZ()
+                      + (missTotal > 0 ? " | THIEU " + missTotal + " chunk (vien do)" : " | du chunk, bam C de gui");
+                  g.drawTextWithShadow(mc.textRenderer, t, 6, 6, missTotal > 0 ? 0xFFFF5555 : 0xFF55FF55);
+              }
+
+              // ================= Freecam =================
               static boolean free = false;
               static ArmorStandEntity cam;
               static long lastNs;
-              static float savedYaw, savedPitch;
+              static float savedYaw, savedPitch;   // goc nhin that cua nhan vat, tra lai khi tat freecam
+              static float frozenYaw;              // nhan vat that dung yen o goc nay
+              static float camYaw, camPitch;       // goc nhin cua camera
 
-              @Override
-              public void onInitializeClient() {
-                  var cat = KeyBinding.Category.create(Identifier.of("blockcopy", "main"));
-                  keyA    = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.a",    GLFW.GLFW_KEY_Z, cat));
-                  keyB    = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.b",    GLFW.GLFW_KEY_X, cat));
-                  keySend = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.send", GLFW.GLFW_KEY_C, cat));
-                  keyFree = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.free", GLFW.GLFW_KEY_V, cat));
-
-                  ClientChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
-                      if (world != cachedWorld) { CACHE.clear(); cachedWorld = world; }
-                      CACHE.put(ChunkPos.toLong(chunk.getPos().x, chunk.getPos().z), chunk);
-                  });
-
-                  // chan phim di chuyen / click cua nhan vat that khi dang freecam
-                  ClientTickEvents.START_CLIENT_TICK.register(mc -> { if (free) lockInput(mc); });
-
-                  // cap nhat camera moi frame cho muot
-                  HudRenderCallback.EVENT.register((ctx, tickCounter) -> frame(MinecraftClient.getInstance()));
-
-                  ClientTickEvents.END_CLIENT_TICK.register(mc -> {
-                      if (mc.world == null || mc.player == null) { free = false; cam = null; return; }
-
-                      while (keyFree.wasPressed()) toggleFree(mc);
-
-                      while (keyA.wasPressed()) { BlockPos p = pick(mc); if (p != null) { a = p; msg(mc, "A = " + p.toShortString()); info(mc); } }
-                      while (keyB.wasPressed()) { BlockPos p = pick(mc); if (p != null) { b = p; msg(mc, "B = " + p.toShortString()); info(mc); } }
-                      while (keySend.wasPressed()) {
-                          if (a == null || b == null) { msg(mc, "Chua chon du A va B"); continue; }
-                          BlockBox box = BlockBox.create(a, b);
-                          int miss = missingChunks(box);
-                          long nowMs = System.currentTimeMillis();
-                          if (miss > 0 && nowMs - lastSendMs > 4000) {
-                              lastSendMs = nowMs;
-                              msg(mc, "Con " + miss + " chunk chua tai. Di bo lai gan do roi bam C lai. Bam C them 1 lan trong 4s de gui bat chap.");
-                              continue;
-                          }
-                          Path f = export(mc.world, box);
-                          msg(mc, "Dang gui " + f.getFileName() + "...");
-                          new Thread(() -> {
-                              try {
-                                  DiscordSender.send(f, "Vung " + box.getBlockCountX() + "x" + box.getBlockCountY() + "x" + box.getBlockCountZ());
-                                  mc.execute(() -> msg(mc, "Da gui xong"));
-                              } catch (Exception e) {
-                                  mc.execute(() -> msg(mc, "Loi: " + e.getMessage()));
-                              }
-                          }).start();
-                      }
-                  });
-              }
+              static boolean down(long w, int key) { return GLFW.glfwGetKey(w, key) == GLFW.GLFW_PRESS; }
 
               static void toggleFree(MinecraftClient mc) {
                   if (!free) {
@@ -275,10 +336,13 @@ jobs:
                       double off = cam.getEyeY() - cam.getY();
                       cam.refreshPositionAndAngles(eye.x, eye.y - off, eye.z, yaw, pitch);
                       savedYaw = yaw; savedPitch = pitch;
+                      camYaw = yaw; camPitch = pitch;
+                      frozenYaw = yaw;
+                      mc.player.setPitch(0f); // pitch that = 0 de chuot khong bi kep o +-90
                       mc.setCameraEntity(cam);
                       lastNs = System.nanoTime();
                       free = true;
-                      msg(mc, "Freecam BAT: WASD bay, Space len, Shift xuong, Ctrl nhanh. V de tat");
+                      msg(mc, "Freecam BAT: WASD bay, Space len, Shift xuong, Ctrl nhanh. V de tat. Nhan vat that dung yen.");
                   } else {
                       mc.setCameraEntity(mc.player);
                       mc.player.setYaw(savedYaw);
@@ -299,21 +363,24 @@ jobs:
                   }
               }
 
-              static boolean down(long w, int key) { return GLFW.glfwGetKey(w, key) == GLFW.GLFW_PRESS; }
-
-              static void frame(MinecraftClient mc) {
-                  if (!free || cam == null || mc.player == null) return;
+              static void freecamFrame(MinecraftClient mc) {
+                  if (!free || cam == null) return;
                   long now = System.nanoTime();
                   double dt = Math.min((now - lastNs) / 1e9, 0.1);
                   lastNs = now;
 
-                  float yaw = mc.player.getYaw(), pitch = mc.player.getPitch();
-                  double x = cam.getX(), y = cam.getY(), z = cam.getZ();
+                  // chuot xoay nhan vat that -> lay phan xoay do cong vao camera, roi tra nhan vat ve cu
+                  var pl = mc.player;
+                  camYaw += pl.getYaw() - frozenYaw;
+                  camPitch = MathHelper.clamp(camPitch + pl.getPitch(), -90f, 90f);
+                  pl.setYaw(frozenYaw);
+                  pl.setPitch(0f);
 
+                  double x = cam.getX(), y = cam.getY(), z = cam.getZ();
                   if (mc.currentScreen == null) {
                       long w = mc.getWindow().getHandle();
-                      Vec3d f = Vec3d.fromPolar(pitch, yaw);
-                      Vec3d r = Vec3d.fromPolar(0f, yaw + 90f);
+                      Vec3d f = Vec3d.fromPolar(camPitch, camYaw);
+                      Vec3d r = Vec3d.fromPolar(0f, camYaw + 90f);
                       Vec3d mv = Vec3d.ZERO;
                       if (down(w, GLFW.GLFW_KEY_W)) mv = mv.add(f);
                       if (down(w, GLFW.GLFW_KEY_S)) mv = mv.subtract(f);
@@ -327,7 +394,81 @@ jobs:
                           x += mv.x; y += mv.y; z += mv.z;
                       }
                   }
-                  cam.refreshPositionAndAngles(x, y, z, yaw, pitch);
+                  cam.refreshPositionAndAngles(x, y, z, camYaw, camPitch);
+              }
+
+              // ================= Phim tat Ctrl+Z / Ctrl+X (do truc tiep tung frame, khong bo lo cu bam nhanh) =================
+              static boolean prevZ, prevX;
+
+              static void hotkeys(MinecraftClient mc) {
+                  long w = mc.getWindow().getHandle();
+                  boolean ctrl = down(w, GLFW.GLFW_KEY_LEFT_CONTROL) || down(w, GLFW.GLFW_KEY_RIGHT_CONTROL);
+                  boolean z = down(w, GLFW.GLFW_KEY_Z), x = down(w, GLFW.GLFW_KEY_X);
+                  boolean typing = mc.currentScreen != null;
+
+                  if (!typing && ctrl && z && !prevZ) {
+                      BlockPos p = pick(mc);
+                      if (p != null) { a = p; missTick = 0; msg(mc, "A = " + p.toShortString()); info(mc); }
+                      else msg(mc, "Khong trung block nao (nhin thang vao block dang hien, trong 256 block)");
+                  }
+                  if (!typing && ctrl && x && !prevX) {
+                      BlockPos p = pick(mc);
+                      if (p != null) { b = p; missTick = 0; msg(mc, "B = " + p.toShortString()); info(mc); }
+                      else msg(mc, "Khong trung block nao (nhin thang vao block dang hien, trong 256 block)");
+                  }
+                  prevZ = z; prevX = x;
+              }
+
+              @Override
+              public void onInitializeClient() {
+                  var cat = KeyBinding.Category.create(Identifier.of("blockcopy", "main"));
+                  keySend = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.send", GLFW.GLFW_KEY_C, cat));
+                  keyFree = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.free", GLFW.GLFW_KEY_V, cat));
+
+                  ClientChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
+                      if (world != cachedWorld) { CACHE.clear(); cachedWorld = world; missingList.clear(); missTick = 0; }
+                      CACHE.put(ChunkPos.toLong(chunk.getPos().x, chunk.getPos().z), chunk);
+                  });
+
+                  // chan phim di chuyen / click cua nhan vat that khi dang freecam
+                  ClientTickEvents.START_CLIENT_TICK.register(mc -> { if (free) lockInput(mc); });
+
+                  // moi frame: freecam -> phim tat -> ve ESP
+                  HudRenderCallback.EVENT.register((ctx, tickCounter) -> {
+                      MinecraftClient mc = MinecraftClient.getInstance();
+                      if (mc.world == null || mc.player == null) return;
+                      freecamFrame(mc);
+                      hotkeys(mc);
+                      drawEsp(ctx, mc);
+                  });
+
+                  ClientTickEvents.END_CLIENT_TICK.register(mc -> {
+                      if (mc.world == null || mc.player == null) { free = false; cam = null; return; }
+
+                      while (keyFree.wasPressed()) toggleFree(mc);
+
+                      while (keySend.wasPressed()) {
+                          if (a == null || b == null) { msg(mc, "Chua chon du A va B (Ctrl+Z, Ctrl+X)"); continue; }
+                          BlockBox box = BlockBox.create(a, b);
+                          int miss = missingChunks(box);
+                          long nowMs = System.currentTimeMillis();
+                          if (miss > 0 && nowMs - lastSendMs > 4000) {
+                              lastSendMs = nowMs;
+                              msg(mc, "Con " + miss + " chunk chua tai (vien do tren man hinh). Di bo lai gan do roi bam C lai. Bam C them 1 lan trong 4s de gui bat chap.");
+                              continue;
+                          }
+                          Path f = export(mc.world, box);
+                          msg(mc, "Dang gui " + f.getFileName() + "...");
+                          new Thread(() -> {
+                              try {
+                                  DiscordSender.send(f, "Vung " + box.getBlockCountX() + "x" + box.getBlockCountY() + "x" + box.getBlockCountZ());
+                                  mc.execute(() -> msg(mc, "Da gui xong"));
+                              } catch (Exception e) {
+                                  mc.execute(() -> msg(mc, "Loi: " + e.getMessage()));
+                              }
+                          }).start();
+                      }
+                  });
               }
 
               static BlockPos pick(MinecraftClient mc) {
@@ -402,5 +543,5 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: BlockCopy build ${{ github.run_number }} (Fabric 1.21.11)
-          body: "Phim: V = freecam, Z = goc A, X = goc B, C = gui Discord. Mod nho chunk da tai, canh bao chunk thieu. Chi can Fabric API."
+          body: "Phim: V = freecam, Ctrl+Z = goc A, Ctrl+X = goc B, C = gui Discord. Chunk thieu duoc ve vien do (ESP) tren man hinh. Chi can Fabric API."
           files: ${{ steps.jar.outputs.path }}
