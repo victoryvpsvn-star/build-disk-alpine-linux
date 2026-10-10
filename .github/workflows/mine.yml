@@ -327,7 +327,7 @@ jobs:
                   String t = "BlockCopy: " + box.getBlockCountX() + "x" + box.getBlockCountY() + "x" + box.getBlockCountZ()
                       + (missTotal > 0 ? " | THIEU " + missTotal + " chunk (vien do)" : " | du chunk, bam C de gui");
                   g.drawTextWithShadow(mc.textRenderer, t, 6, 6, missTotal > 0 ? 0xFFFF5555 : 0xFF55FF55);
-                  if (auto) g.drawTextWithShadow(mc.textRenderer, "AUTO: dang di toi chunk thieu (Ctrl+G de tat)", 6, 30, 0xFFFFFF55);
+                  if (auto) g.drawTextWithShadow(mc.textRenderer, "AUTO: " + autoStatus + " (Ctrl+G de tat)", 6, 30, 0xFFFFFF55);
               }
 
               // ================= Freecam =================
@@ -422,8 +422,10 @@ jobs:
                   BlockBox box = area(mc.world);
                   long now = System.currentTimeMillis();
                   double px = mc.player.getX(), pz = mc.player.getZ();
+                  double yawRad = Math.toRadians(mc.player.getYaw());
+                  double hx = -Math.sin(yawRad), hz = Math.cos(yawRad);
                   int[] best = null;
-                  double bd = Double.MAX_VALUE;
+                  double bs = Double.MAX_VALUE;
                   for (int cx = box.getMinX() >> 4; cx <= box.getMaxX() >> 4; cx++)
                       for (int cz = box.getMinZ() >> 4; cz <= box.getMaxZ() >> 4; cz++) {
                           long k = ChunkPos.toLong(cx, cz);
@@ -431,8 +433,10 @@ jobs:
                           Long until = skip.get(k);
                           if (until != null && until > now) continue;
                           double dx = cx * 16 + 8 - px, dz = cz * 16 + 8 - pz;
-                          double d = dx * dx + dz * dz;
-                          if (d < bd) { bd = d; best = new int[]{cx, cz}; }
+                          double d = Math.max(Math.hypot(dx, dz), 1e-6);
+                          double cos = (dx * hx + dz * hz) / d;     // 1 = ngay truoc mat, -1 = sau lung
+                          double score = d * (2.0 - cos);           // chunk phia truoc duoc uu tien
+                          if (score < bs) { bs = score; best = new int[]{cx, cz}; }
                       }
                   return best;
               }
@@ -446,17 +450,23 @@ jobs:
                   msg(mc, "Tu dong TAT: " + why);
               }
 
+              static int detour;
+              static float detourYaw;
+              static String autoStatus = "";
+
               // goi moi tick, SAU lockInput, de nhan vat that tu di du dang freecam
               static void autoStep(MinecraftClient mc) {
                   var pl = mc.player;
                   var o = mc.options;
+                  autoTicks++;
                   if (a == null || b == null) { stopAuto(mc, "chua chon A va B"); return; }
                   BlockBox box = area(mc.world);
                   if (missingChunks(box) == 0) { stopAuto(mc, "da du chunk, bam C de gui"); return; }
                   if (pl.getHealth() < lastHp - 0.01f) { stopAuto(mc, "bi mat mau, dung cho an toan"); return; }
                   lastHp = pl.getHealth();
 
-                  if (autoCh == null || autoTicks++ % 10 == 0 || CACHE.containsKey(ChunkPos.toLong(autoCh[0], autoCh[1]))) {
+                  // GIU muc tieu cho toi khi no load xong (khong doi qua doi lai nua)
+                  if (autoCh == null || CACHE.containsKey(ChunkPos.toLong(autoCh[0], autoCh[1]))) {
                       autoCh = nearestMissing(mc);
                       if (autoCh == null) { stopAuto(mc, "khong toi duoc may chunk con lai (bi ket), thu di tay"); return; }
                   }
@@ -469,32 +479,48 @@ jobs:
                       return;
                   }
 
-                  // phat hien ket: moi 1 giay phai di duoc >= 1 block
-                  if (autoTicks % 20 == 0) {
-                      double moved = Math.hypot(pl.getX() - lastPx, pl.getZ() - lastPz);
-                      lastPx = pl.getX(); lastPz = pl.getZ();
-                      stuck = moved < 1.0 ? stuck + 1 : 0;
-                      if (stuck >= 6) {
-                          skip.put(ChunkPos.toLong(autoCh[0], autoCh[1]), System.currentTimeMillis() + 60000);
-                          autoCh = null; stuck = 0;
-                          return;
-                      }
-                  }
-
-                  float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                  // quay dan dan (toi da 20 do/tick) thay vi quay giat tuc thi
+                  float want = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                  if (detour > 0) { want += detourYaw; detour--; }
+                  float cur = pl.getYaw();
+                  float diff = MathHelper.wrapDegrees(want - cur);
+                  float yaw = cur + MathHelper.clamp(diff, -20f, 20f);
                   pl.setYaw(yaw);
                   pl.setPitch(0f);
                   if (free) frozenYaw = yaw;
-                  o.forwardKey.setPressed(true);
-                  o.sprintKey.setPressed(true);
-                  if (stuck >= 1) o.jumpKey.setPressed(true);
+
+                  // chi chay toi khi da quay gan dung huong
+                  boolean aligned = Math.abs(diff) < 45f;
+                  o.forwardKey.setPressed(aligned);
+                  o.sprintKey.setPressed(aligned);
+
+                  // phat hien ket: moi 0.5 giay (chi tinh luc dang chay) phai di duoc >= 1.2 block
+                  if (autoTicks % 10 == 0) {
+                      double moved = Math.hypot(pl.getX() - lastPx, pl.getZ() - lastPz);
+                      lastPx = pl.getX(); lastPz = pl.getZ();
+                      if (aligned) {
+                          if (moved < 1.2) {
+                              stuck++;
+                              if (stuck >= 2) { detourYaw = (stuck % 2 == 0 ? 75f : -75f) * (1 + stuck / 6); detour = 25; }
+                              if (stuck >= 16) {
+                                  skip.put(ChunkPos.toLong(autoCh[0], autoCh[1]), System.currentTimeMillis() + 60000);
+                                  autoCh = null; stuck = 0; detour = 0;
+                                  o.jumpKey.setPressed(false);
+                                  return;
+                              }
+                          } else if (detour <= 0) stuck = 0;
+                      }
+                  }
+                  o.jumpKey.setPressed(aligned && stuck >= 1);
+                  autoStatus = "toi chunk " + autoCh[0] + "," + autoCh[1] + " | cach " + (int) Math.hypot(dx, dz) + " block"
+                      + (stuck > 0 ? " | dang ket x" + stuck + " (nhay/vong)" : "");
               }
 
               static void toggleAuto(MinecraftClient mc) {
                   if (auto) { stopAuto(mc, "do ban tat"); return; }
                   if (a == null || b == null) { msg(mc, "Chon A va B truoc (Ctrl+Z, Ctrl+X)"); return; }
                   mc.options.getViewDistance().setValue(32);  // xin server gui xa nhat co the
-                  auto = true; autoCh = null; autoTicks = 0; stuck = 0;
+                  auto = true; autoCh = null; autoTicks = 0; stuck = 0; detour = 0; autoStatus = "";
                   lastHp = mc.player.getHealth();
                   lastPx = mc.player.getX(); lastPz = mc.player.getZ();
                   skip.clear();
