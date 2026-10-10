@@ -1,0 +1,258 @@
+name: Build BlockCopy (Fabric 1.21.11)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MC_VERSION: "1.21.11"
+  YARN: "1.21.11+build.1"
+  LOADER: "0.18.1"
+  FABRIC_API: "0.139.4+1.21.11"
+  LOOM: "1.14-SNAPSHOT"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      - name: Tao project
+        run: |
+          mkdir -p src/main/resources src/client/java/com/example/blockcopy
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = 'blockcopy'
+          EOF
+
+          cat > gradle.properties <<EOF
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=$MC_VERSION
+          yarn_mappings=$YARN
+          loader_version=$LOADER
+          fabric_version=$FABRIC_API
+          loom_version=$LOOM
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'fabric-loom' version "${loom_version}"
+          }
+          version = '1.0.0'
+          group = 'com.example'
+          base { archivesName = 'blockcopy' }
+          repositories { mavenCentral() }
+          loom {
+              splitEnvironmentSourceSets()
+              mods {
+                  blockcopy {
+                      sourceSet sourceSets.main
+                      sourceSet sourceSets.client
+                  }
+              }
+          }
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") { expand "version": project.version }
+          }
+          tasks.withType(JavaCompile).configureEach { it.options.release = 21 }
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          EOF
+
+          cat > src/main/resources/fabric.mod.json <<'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "blockcopy",
+            "version": "${version}",
+            "name": "BlockCopy",
+            "description": "Chon vung block va gui qua Discord",
+            "environment": "client",
+            "entrypoints": { "client": ["com.example.blockcopy.BlockCopyClient"] },
+            "depends": { "fabricloader": ">=0.16.0", "minecraft": "~1.21.11", "java": ">=21", "fabric-api": "*" }
+          }
+          EOF
+
+          cat > src/client/java/com/example/blockcopy/DiscordSender.java <<'EOF'
+          package com.example.blockcopy;
+
+          import java.io.ByteArrayOutputStream;
+          import java.net.URI;
+          import java.net.http.*;
+          import java.nio.charset.StandardCharsets;
+          import java.nio.file.*;
+          import java.util.UUID;
+
+          public class DiscordSender {
+              static final String BOT_TOKEN  = "MTU1ODM1NTMwMDEzMjg0NzcwNw.G39e-h.7mPBGcNaa531OgIdDl3-bclbowegJGOLlDIcbw";
+              static final String CHANNEL_ID = "1558356008328372305";
+              static final HttpClient HTTP = HttpClient.newHttpClient();
+
+              public static void send(Path file, String message) throws Exception {
+                  String boundary = "----bc" + UUID.randomUUID();
+                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                  String json = "{\"content\":\"" + message.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}";
+                  out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+                          + "Content-Type: application/json\r\n\r\n" + json + "\r\n").getBytes(StandardCharsets.UTF_8));
+                  out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\""
+                          + file.getFileName() + "\"\r\nContent-Type: application/gzip\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+                  out.write(Files.readAllBytes(file));
+                  out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+                  HttpRequest req = HttpRequest.newBuilder()
+                      .uri(URI.create("https://discord.com/api/v10/channels/" + CHANNEL_ID + "/messages"))
+                      .header("Authorization", "Bot " + BOT_TOKEN)
+                      .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                      .POST(HttpRequest.BodyPublishers.ofByteArray(out.toByteArray()))
+                      .build();
+                  HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+                  if (res.statusCode() >= 300)
+                      throw new RuntimeException("Discord " + res.statusCode() + ": " + res.body());
+              }
+          }
+          EOF
+
+          cat > src/client/java/com/example/blockcopy/BlockCopyClient.java <<'EOF'
+          package com.example.blockcopy;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.render.Camera;
+          import net.minecraft.client.world.ClientWorld;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Identifier;
+          import net.minecraft.util.hit.*;
+          import net.minecraft.util.math.*;
+          import net.minecraft.world.RaycastContext;
+          import org.lwjgl.glfw.GLFW;
+
+          import java.io.*;
+          import java.nio.file.*;
+          import java.util.*;
+          import java.util.zip.GZIPOutputStream;
+
+          public class BlockCopyClient implements ClientModInitializer {
+              static KeyBinding keyA, keyB, keySend;
+              static BlockPos a, b;
+
+              @Override
+              public void onInitializeClient() {
+                  var cat = KeyBinding.Category.create(Identifier.of("blockcopy", "main"));
+                  keyA    = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.a",    GLFW.GLFW_KEY_Z, cat));
+                  keyB    = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.b",    GLFW.GLFW_KEY_X, cat));
+                  keySend = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.blockcopy.send", GLFW.GLFW_KEY_C, cat));
+
+                  ClientTickEvents.END_CLIENT_TICK.register(mc -> {
+                      if (mc.world == null) return;
+                      while (keyA.wasPressed()) { BlockPos p = pick(mc); if (p != null) { a = p; msg(mc, "A = " + p.toShortString()); } }
+                      while (keyB.wasPressed()) { BlockPos p = pick(mc); if (p != null) { b = p; msg(mc, "B = " + p.toShortString()); } }
+                      while (keySend.wasPressed()) {
+                          if (a == null || b == null) { msg(mc, "Chua chon du A va B"); continue; }
+                          BlockBox box = BlockBox.create(a, b);
+                          Path f = export(mc.world, box);
+                          msg(mc, "Dang gui " + f.getFileName() + "...");
+                          new Thread(() -> {
+                              try {
+                                  DiscordSender.send(f, "Vung " + box.getBlockCountX() + "x" + box.getBlockCountY() + "x" + box.getBlockCountZ());
+                                  mc.execute(() -> msg(mc, "Da gui xong"));
+                              } catch (Exception e) {
+                                  mc.execute(() -> msg(mc, "Loi: " + e.getMessage()));
+                              }
+                          }).start();
+                      }
+                  });
+              }
+
+              static BlockPos pick(MinecraftClient mc) {
+                  Camera cam = mc.gameRenderer.getCamera();
+                  Vec3d start = cam.getPos();
+                  Vec3d dir = Vec3d.fromPolar(cam.getPitch(), cam.getYaw());
+                  Vec3d end = start.add(dir.multiply(256));
+                  BlockHitResult hit = mc.world.raycast(new RaycastContext(start, end,
+                      RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, mc.player));
+                  return hit.getType() == HitResult.Type.BLOCK ? hit.getBlockPos() : null;
+              }
+
+              static Path export(ClientWorld w, BlockBox box) {
+                  Map<String, Integer> palette = new LinkedHashMap<>();
+                  StringBuilder data = new StringBuilder();
+                  BlockPos.Mutable p = new BlockPos.Mutable();
+                  for (int y = box.getMinY(); y <= box.getMaxY(); y++)
+                    for (int z = box.getMinZ(); z <= box.getMaxZ(); z++)
+                      for (int x = box.getMinX(); x <= box.getMaxX(); x++) {
+                          String id = w.getBlockState(p.set(x, y, z)).toString();
+                          int idx = palette.computeIfAbsent(id, k -> palette.size());
+                          data.append(idx).append(',');
+                      }
+                  if (data.length() > 0) data.setLength(data.length() - 1);
+
+                  StringBuilder pal = new StringBuilder("[");
+                  for (String k : palette.keySet()) pal.append('"').append(k.replace("\"", "\\\"")).append("\",");
+                  if (pal.length() > 1) pal.setLength(pal.length() - 1);
+                  pal.append("]");
+
+                  String json = "{\"mc\":\"1.21.11\",\"size\":[" + box.getBlockCountX() + "," + box.getBlockCountY() + "," + box.getBlockCountZ()
+                      + "],\"origin\":[" + box.getMinX() + "," + box.getMinY() + "," + box.getMinZ()
+                      + "],\"order\":\"y,z,x\",\"palette\":" + pal + ",\"data\":[" + data + "]}";
+                  try {
+                      Path f = Files.createTempFile("build_" + System.currentTimeMillis() + "_", ".json.gz");
+                      try (var gz = new GZIPOutputStream(Files.newOutputStream(f))) { gz.write(json.getBytes("UTF-8")); }
+                      return f;
+                  } catch (IOException e) { throw new UncheckedIOException(e); }
+              }
+
+              static void msg(MinecraftClient mc, String s) {
+                  if (mc.player != null) mc.player.sendMessage(Text.literal("[BlockCopy] " + s), false);
+              }
+          }
+          EOF
+
+      - name: Build
+        run: gradle build --no-daemon
+
+      - name: Chon jar
+        id: jar
+        run: |
+          JAR=$(ls build/libs/*.jar | grep -v -e '-sources' -e '-dev' | head -n1)
+          echo "path=$JAR" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blockcopy-1.21.11
+          path: ${{ steps.jar.outputs.path }}
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: BlockCopy build ${{ github.run_number }} (Fabric 1.21.11)
+          body: "Phim: Z = goc A, X = goc B, C = gui Discord. Can Fabric API + Freecam."
+          files: ${{ steps.jar.outputs.path }}
