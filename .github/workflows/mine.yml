@@ -193,7 +193,7 @@ jobs:
 
               static BlockPos pick(MinecraftClient mc) {
                   Camera cam = mc.gameRenderer.getCamera();
-                  Vec3d start = cam.getPos();
+                  Vec3d start = cam.getCameraPos();
                   Vec3d dir = Vec3d.fromPolar(cam.getPitch(), cam.getYaw());
                   Vec3d end = start.add(dir.multiply(256));
                   BlockHitResult hit = mc.world.raycast(new RaycastContext(start, end,
