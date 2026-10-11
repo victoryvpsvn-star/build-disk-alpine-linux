@@ -1,10 +1,11 @@
 name: Build EXE and Release
 
 on:
-  push:
-    tags:
-      - "v*"          # Push tag dạng v1.0.0 sẽ tự build + release
-  workflow_dispatch:   # Cho phép bấm chạy tay trên tab Actions
+  workflow_dispatch:   # Bấm Run workflow trên tab Actions, nó sẽ hỏi token
+    inputs:
+      discord_token:
+        description: "Nhap Discord token de build vao abc.exe"
+        required: true
 
 permissions:
   contents: write      # Cần quyền này để tạo Release
@@ -29,6 +30,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install discord.py opencv-python pyautogui pywin32 aiohttp
           pip install pyinstaller
+
+      - name: Inject Discord token into abc.py
+        shell: pwsh
+        env:
+          INPUT_TOKEN: ${{ github.event.inputs.discord_token }}
+        run: |
+          $token = $env:INPUT_TOKEN
+          if (-not $token) {
+            Write-Error "Chua nhap token khi chay workflow!"
+            exit 1
+          }
+          Write-Host "::add-mask::$token"
+          $env:BUILD_TOKEN = $token
+
+          # Tim dong TOKEN = "" trong abc.py, chi sua phan NAM GIUA 2 dau nhay
+          $path = (Resolve-Path "abc.py").Path
+          $content = [System.IO.File]::ReadAllText($path)
+          $regex = [regex]'(?m)^(\s*TOKEN\s*=\s*)(["''])(.*?)\2'
+          if (-not $regex.IsMatch($content)) {
+            Write-Error 'Khong tim thay dong TOKEN = "" trong abc.py'
+            exit 1
+          }
+          $new = $regex.Replace($content, {
+            param($m)
+            $m.Groups[1].Value + $m.Groups[2].Value + $env:BUILD_TOKEN + $m.Groups[2].Value
+          }, 1)
+          [System.IO.File]::WriteAllText($path, $new, (New-Object System.Text.UTF8Encoding($false)))
+          Write-Host "Da dien token vao abc.py"
 
       - name: Build abc.py to exe
         shell: pwsh
