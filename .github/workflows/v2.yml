@@ -730,11 +730,11 @@ jobs:
                   except Exception as e:
                       print("bot lỗi, thử lại 5s:", e); time.sleep(5)
           '@
-          $py = $py -replace "(?m)^ {10}", ""
           [System.IO.File]::WriteAllText((Join-Path $PWD "agent.py"), $py)
 
       - name: Kiểm tra cú pháp agent.py
-        run: python -c "import ast; ast.parse(open('agent.py',encoding='utf-8').read()); print('OK: cú pháp hợp lệ')"
+        run: |
+          python -c "import ast; ast.parse(open('agent.py',encoding='utf-8').read()); print('OK: cú pháp hợp lệ')"
 
       - name: Cài thư viện Python
         run: |
