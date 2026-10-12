@@ -1729,14 +1729,18 @@ jobs:
           $inject | python -
 
       - name: Register PyArmor license
-        if: ${{ secrets.PYARMOR_REGCODE != '' }}
+        continue-on-error: true
         shell: pwsh
         env:
           PYARMOR_REGCODE: ${{ secrets.PYARMOR_REGCODE }}
         run: |
-          Set-Content -Path regcode.txt -Value $env:PYARMOR_REGCODE
-          pyarmor reg -p "non-profits" regcode.txt
-          pyarmor -v
+          if ($env:PYARMOR_REGCODE) {
+            Set-Content -Path regcode.txt -Value $env:PYARMOR_REGCODE
+            pyarmor reg -p "non-profits" regcode.txt
+            pyarmor -v
+          } else {
+            Write-Host "Khong co PYARMOR_REGCODE - bo qua"
+          }
 
       - name: Build exe
         shell: pwsh
