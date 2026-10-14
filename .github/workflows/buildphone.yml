@@ -131,11 +131,19 @@ jobs:
 
 
           def download(url, dest):
-              def hook(b, bs, total):
-                  if total > 0:
-                      print(f"\r  tai... {min(100, int(b * bs * 100 / total))}%", end="", flush=True)
-              urllib.request.urlretrieve(url, dest, hook)
-              print()
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (phone.exe)"})
+              with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
+                  total, got, last = int(r.headers.get("Content-Length") or 0), 0, -1
+                  while True:
+                      b = r.read(1 << 20)
+                      if not b:
+                          break
+                      f.write(b)
+                      got += len(b)
+                      pct = got * 100 // total if total else -1
+                      if total and pct != last and pct % 10 == 0:
+                          print(f"  tai... {pct}%", flush=True)
+                          last = pct
 
 
           # ----------------------------------------------------------------------------
@@ -251,15 +259,15 @@ jobs:
                       os.remove(z)
 
                   say("Chap nhan license + tai emulator, platform-tools, system image (vai GB, doi chut)...")
-                  subprocess.run([sdkm, f"--sdk_root={sdk}", "--licenses"], input="y\n" * 40, text=True,
+                  subprocess.run(f'"{sdkm}" --sdk_root="{sdk}" --licenses', input="y\n" * 40, text=True, shell=True,
                                  env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  r = subprocess.run([sdkm, f"--sdk_root={sdk}", "platform-tools", "emulator", img], env=env)
+                  r = subprocess.run(f'"{sdkm}" --sdk_root="{sdk}" "platform-tools" "emulator" "{img}"', shell=True, env=env)
                   if r.returncode != 0:
                       raise SystemExit(f"sdkmanager loi khi tai {img}")
 
                   say(f"Tao may ao {name} (Android {ver} / API {api})...")
-                  subprocess.run([avdm, "create", "avd", "-n", name, "-k", img, "-d", "pixel_6", "--force"],
-                                 input="no\n", text=True, env=env)
+                  subprocess.run(f'"{avdm}" create avd -n "{name}" -k "{img}" -d pixel_6 --force',
+                                 input="no\n", text=True, shell=True, env=env)
                   if not os.path.exists(cfg):
                       raise SystemExit("Tao AVD that bai.")
 
@@ -364,28 +372,27 @@ jobs:
           name: phone-exe
 
       - name: Lan 1 - phai BUILD
-        shell: pwsh
+        shell: bash
         run: |
-          ./phone.exe --path "$env:STORE" --version ${{ matrix.version }} --ram 2048 --disk 4 --cores 2 --auto --no-boot 2>&1 | Tee-Object run1.log
-          if ($LASTEXITCODE -ne 0) { throw "phone.exe loi (exit $LASTEXITCODE)" }
-          if (-not (Select-String -Path run1.log -Pattern '\[BUILD\]' -Quiet)) { throw 'Lan 1 phai la BUILD' }
+          ./phone.exe --path "$STORE" --version ${{ matrix.version }} --ram 2048 --disk 4 --cores 2 --auto --no-boot 2>&1 | tee run1.log
+          grep -q '\[BUILD\]' run1.log || { echo 'Lan 1 phai la BUILD'; exit 1; }
 
       - name: Kiem tra luu dung noi + dung RAM/Core/Disk
-        shell: pwsh
+        shell: bash
         run: |
-          $cfg = Join-Path $env:STORE 'avd\phone-a${{ matrix.version }}.avd\config.ini'
-          if (-not (Test-Path $cfg)) { throw "Khong thay $cfg" }
-          Select-String -Path $cfg -Pattern 'hw.ramSize|hw.cpu.ncore|disk.dataPartition.size|hw.gpu.mode'
-          foreach ($p in 'hw.ramSize=2048','hw.cpu.ncore=2','disk.dataPartition.size=4G','hw.gpu.mode=host') {
-            if (-not (Select-String -Path $cfg -Pattern ([regex]::Escape($p)) -Quiet)) { throw "Config sai: thieu $p" }
-          }
+          CFG="$(cygpath -u "$STORE")/avd/phone-a${{ matrix.version }}.avd/config.ini"
+          test -f "$CFG" || { echo "Khong thay $CFG"; ls -R "$(cygpath -u "$STORE")" | head -50; exit 1; }
+          grep -E 'hw.ramSize|hw.cpu.ncore|disk.dataPartition.size|hw.gpu.mode' "$CFG"
+          for p in 'hw.ramSize=2048' 'hw.cpu.ncore=2' 'disk.dataPartition.size=4G' 'hw.gpu.mode=host'; do
+            tr -d '\r' < "$CFG" | grep -qxF "$p" || { echo "Config sai: thieu $p"; exit 1; }
+          done
 
       - name: Lan 2 - phai REUSE (khong build lai, khong hoi lai)
-        shell: pwsh
+        shell: bash
         run: |
-          ./phone.exe --path "$env:STORE" --version ${{ matrix.version }} --auto --no-boot 2>&1 | Tee-Object run2.log
-          if (-not (Select-String -Path run2.log -Pattern '\[REUSE\]' -Quiet)) { throw 'Lan 2 phai la REUSE' }
-          if (Select-String -Path run2.log -Pattern '\[BUILD\]' -Quiet) { throw 'Lan 2 khong duoc build lai' }
+          ./phone.exe --path "$STORE" --version ${{ matrix.version }} --auto --no-boot 2>&1 | tee run2.log
+          grep -q '\[REUSE\]' run2.log || { echo 'Lan 2 phai la REUSE'; exit 1; }
+          ! grep -q '\[BUILD\]' run2.log || { echo 'Lan 2 khong duoc build lai'; exit 1; }
 
       - name: Luu log
         if: always()
