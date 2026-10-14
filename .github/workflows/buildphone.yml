@@ -139,6 +139,43 @@ jobs:
 
 
           # ----------------------------------------------------------------------------
+          JDK_URL = "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jdk/hotspot/normal/eclipse"
+
+
+          def ensure_java(path, env):
+              """Tu tai JDK 17 portable vao <path>\\jdk - khong cai gi vao Windows."""
+              jdk = os.path.join(path, "jdk")
+              if not os.path.exists(os.path.join(jdk, "bin", "java.exe")):
+                  say(f"Tai JDK 17 portable vao {jdk} (khong can cai gi vao may)...")
+                  z, tmp = os.path.join(path, "jdk.zip"), os.path.join(path, "_jdk_tmp")
+                  download(JDK_URL, z)
+                  shutil.rmtree(tmp, ignore_errors=True)
+                  with zipfile.ZipFile(z) as zf:
+                      zf.extractall(tmp)
+                  inner = os.path.join(tmp, os.listdir(tmp)[0])
+                  shutil.rmtree(jdk, ignore_errors=True)
+                  shutil.move(inner, jdk)
+                  shutil.rmtree(tmp, ignore_errors=True)
+                  os.remove(z)
+              env["JAVA_HOME"] = jdk
+              pk = next((k for k in env if k.lower() == "path"), "PATH")
+              env[pk] = os.path.join(jdk, "bin") + os.pathsep + env.get(pk, "")
+
+
+          def ensure_accel(emu, env):
+              """Emulator can ao hoa CPU. Tu kiem tra, tu bat Windows Hypervisor Platform neu co quyen Admin."""
+              r = subprocess.run([emu, "-accel-check"], capture_output=True, text=True, env=env)
+              out = ((r.stdout or "") + (r.stderr or "")).lower()
+              if r.returncode == 0 and "usable" in out:
+                  return
+              say("Chua bat ao hoa (Windows Hypervisor Platform). Dang thu bat...", "yellow")
+              if ctypes.windll.shell32.IsUserAnAdmin():
+                  subprocess.run(["dism", "/online", "/enable-feature", "/featurename:HypervisorPlatform", "/all", "/norestart"])
+                  raise SystemExit("Da bat Windows Hypervisor Platform. KHOI DONG LAI may roi chay lai phone.exe (may ao van con nguyen).")
+              raise SystemExit("Can quyen Admin de bat ao hoa 1 lan: chuot phai phone.exe -> Run as administrator. "
+                               "(Neu van loi: bat Virtualization / SVM trong BIOS.)")
+
+
           # ----------------------------------------------------------------------------
           def main():
               ap = argparse.ArgumentParser(prog="phone")
@@ -198,8 +235,7 @@ jobs:
                   if ram < 1536 or disk < 2 or cores < 1:
                       raise SystemExit("Toi thieu: RAM 1536 MB, Disk 2 GB, Core 1.")
 
-                  if not shutil.which("java"):
-                      raise SystemExit("Chua co Java. Cai: winget install Microsoft.OpenJDK.17 roi chay lai.")
+                  ensure_java(path, env)
 
                   if not os.path.exists(sdkm):
                       say("Tai Android cmdline-tools...")
@@ -241,6 +277,7 @@ jobs:
                   return
 
               # ---- 3. boot ----
+              ensure_accel(emu, env)
               ini = read_ini(cfg)
               args = [emu, "-avd", name, "-gpu", "host", "-accel", "on", "-no-boot-anim", "-netfast",
                       "-memory", ini.get("hw.ramSize", "2048"), "-cores", ini.get("hw.cpu.ncore", "2")]
@@ -325,11 +362,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: phone-exe
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
 
       - name: Lan 1 - phai BUILD
         shell: pwsh
@@ -420,6 +452,6 @@ jobs:
           name: Virtual Phone build ${{ github.run_number }}
           body: |
             phone.exe - Android ao 12-15 (root + toi uu), da test tu dong.
-            Chay `phone.exe`: lan dau hoi RAM/Disk/Core roi build, cac lan sau boot luon.
+            Chay `phone.exe`: tu tai Java + SDK vao thu muc ban chon, lan dau hoi RAM/Disk/Core roi build, cac lan sau boot luon.
           files: phone.exe
           make_latest: true
