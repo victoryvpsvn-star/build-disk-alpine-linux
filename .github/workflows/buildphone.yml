@@ -1,0 +1,425 @@
+name: Virtual Phone - Auto Build, Test, Release
+
+# CHI CAN FILE NAY (da chua san phone.py ben trong). Dat vao .github/workflows/ la xong.
+# Tu dong hoan toan:
+#  - push / PR          : build exe -> test build+reuse (Android 12-15) -> test boot+root
+#  - push len main      : them buoc tu dong dang phone.exe len GitHub Releases
+#  - moi thu Hai 02:00  : test lai de phat hien Google doi image/emulator
+#  - chay tay           : chi hoi noi luu (D:\phone / C:\phone) va ban Android
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      storage_path:
+        description: 'Noi luu virtual phone (vd D:\phone hoac C:\phone)'
+        required: true
+        default: 'D:\phone'
+      android_version:
+        description: 'Ban Android muon test'
+        type: choice
+        options: ['all', '12', '13', '14', '15']
+        default: 'all'
+
+concurrency:
+  group: virtual-phone-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------- 1. build exe
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Tao phone.py (nam ngay trong workflow - khong can file nao khac)
+        shell: bash
+        run: |
+          cat > phone.py << 'PYEOF'
+          #!/usr/bin/env python3
+          """
+          phone.py - Android ao 12-15 (1 file duy nhat, dong goi duoc thanh phone.exe)
+
+            phone.exe                 -> hoi noi luu / ban Android / (RAM, Disk, Core neu chua co) -> boot
+
+            Da co may ao  -> boot vao dung luon, KHONG build lai, KHONG hoi lai RAM/Disk/Core
+            Chua co       -> hoi RAM + Disk + Core -> tai image -> tao -> boot
+            Mac dinh luu o D:\\phone (nhap C:\\phone neu muon), bat root (adb root) + toi uu
+
+          Build exe:
+            pip install pyinstaller
+            pyinstaller --onefile --name phone phone.py
+          """
+          import argparse
+          import ctypes
+          import os
+          import shutil
+          import subprocess
+          import sys
+          import time
+          import urllib.request
+          import zipfile
+
+          try:
+              sys.stdout.reconfigure(errors="replace")
+          except Exception:
+              pass
+
+          API = {"12": 31, "13": 33, "14": 34, "15": 35}
+          CMDLINE_URL = "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip"
+
+          C = {"cyan": "36", "green": "32", "yellow": "33", "red": "31"}
+
+
+          def say(msg, color="cyan"):
+              print(f"\033[{C[color]}m{msg}\033[0m", flush=True)
+
+
+          def ask(msg, default, auto):
+              if auto:
+                  return str(default)
+              v = input(f"{msg} [{default}]: ").strip()
+              return v if v else str(default)
+
+
+          def host_info():
+              class MS(ctypes.Structure):
+                  _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                              ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                              ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                              ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                              ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+              m = MS()
+              m.dwLength = ctypes.sizeof(MS)
+              ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+              return int(m.ullTotalPhys / 1024 / 1024), os.cpu_count() or 2
+
+
+          def set_ini(path, updates):
+              data, order = {}, []
+              with open(path, encoding="utf-8", errors="ignore") as f:
+                  for line in f:
+                      line = line.rstrip("\r\n")
+                      if "=" in line and not line.lstrip().startswith("#"):
+                          k, v = line.split("=", 1)
+                          k = k.strip()
+                          if k not in data:
+                              order.append(k)
+                          data[k] = v.strip()
+              for k, v in updates.items():
+                  if k not in data:
+                      order.append(k)
+                  data[k] = str(v)
+              with open(path, "w", encoding="utf-8") as f:
+                  for k in order:
+                      f.write(f"{k}={data[k]}\n")
+
+
+          def read_ini(path):
+              d = {}
+              with open(path, encoding="utf-8", errors="ignore") as f:
+                  for line in f:
+                      if "=" in line and not line.lstrip().startswith("#"):
+                          k, v = line.split("=", 1)
+                          d[k.strip()] = v.strip()
+              return d
+
+
+          def download(url, dest):
+              def hook(b, bs, total):
+                  if total > 0:
+                      print(f"\r  tai... {min(100, int(b * bs * 100 / total))}%", end="", flush=True)
+              urllib.request.urlretrieve(url, dest, hook)
+              print()
+
+
+          # ----------------------------------------------------------------------------
+          # ----------------------------------------------------------------------------
+          def main():
+              ap = argparse.ArgumentParser(prog="phone")
+              ap.add_argument("cmd", nargs="?", default="run", choices=["run"])
+              ap.add_argument("--path")
+              ap.add_argument("--version", choices=list(API))
+              ap.add_argument("--ram", type=int, help="MB")
+              ap.add_argument("--disk", type=int, help="GB")
+              ap.add_argument("--cores", type=int)
+              ap.add_argument("--no-root", action="store_true")
+              ap.add_argument("--no-boot", action="store_true")
+              ap.add_argument("--headless", action="store_true")
+              ap.add_argument("--auto", action="store_true", help="khong hoi, dung mac dinh/tham so")
+              a = ap.parse_args()
+
+              if os.name != "nt":
+                  raise SystemExit("Ban exe nay chay tren Windows.")
+
+              # ---- 1. noi luu ----
+              path = (a.path or ask("Luu virtual phone o dau? (vd D:\\phone hoac C:\\phone)", "D:\\phone", a.auto)).rstrip("\\/")
+              drive = os.path.splitdrive(path)[0] + "\\"
+              if not os.path.exists(drive):
+                  raise SystemExit(f"O dia {drive} khong ton tai. Chon duong dan khac (vd C:\\phone).")
+              ver = a.version or ask("Chon Android (12 / 13 / 14 / 15)", "14", a.auto)
+              if ver not in API:
+                  raise SystemExit(f"Version khong hop le: {ver}")
+              api = API[ver]
+
+              sdk, avd_home = os.path.join(path, "sdk"), os.path.join(path, "avd")
+              name = f"phone-a{ver}"
+              img = f"system-images;android-{api};google_apis;x86_64"  # google_apis = userdebug -> adb root duoc
+              for d in (sdk, avd_home, os.path.join(path, ".android")):
+                  os.makedirs(d, exist_ok=True)
+
+              env = dict(os.environ, ANDROID_SDK_ROOT=sdk, ANDROID_HOME=sdk, ANDROID_AVD_HOME=avd_home,
+                         ANDROID_USER_HOME=os.path.join(path, ".android"))
+              sdkm = os.path.join(sdk, "cmdline-tools", "latest", "bin", "sdkmanager.bat")
+              avdm = os.path.join(sdk, "cmdline-tools", "latest", "bin", "avdmanager.bat")
+              adb_exe = os.path.join(sdk, "platform-tools", "adb.exe")
+              emu = os.path.join(sdk, "emulator", "emulator.exe")
+              cfg = os.path.join(avd_home, f"{name}.avd", "config.ini")
+
+              def adb(*args, timeout=60):
+                  r = subprocess.run([adb_exe, *args], capture_output=True, text=True, timeout=timeout, env=env)
+                  return (r.stdout or "").strip()
+
+              # ---- 2. da co -> reuse ----
+              if os.path.exists(cfg) and os.path.exists(emu):
+                  say(f"[REUSE] Da co '{name}' tai {avd_home} -> bo qua build, boot luon.", "green")
+              else:
+                  say(f"[BUILD] Chua co '{name}' -> bat dau tao.", "yellow")
+                  host_ram, host_cores = host_info()
+                  say(f"May ban: RAM {host_ram} MB, {host_cores} core logic.")
+                  ram = a.ram or int(ask("RAM cho may ao (MB)", min(4096, host_ram // 2), a.auto))
+                  disk = a.disk or int(ask("Dung luong o dia cho may ao (GB)", 8, a.auto))
+                  cores = a.cores or int(ask("So core CPU", max(2, min(4, host_cores // 2)), a.auto))
+                  if ram < 1536 or disk < 2 or cores < 1:
+                      raise SystemExit("Toi thieu: RAM 1536 MB, Disk 2 GB, Core 1.")
+
+                  if not shutil.which("java"):
+                      raise SystemExit("Chua co Java. Cai: winget install Microsoft.OpenJDK.17 roi chay lai.")
+
+                  if not os.path.exists(sdkm):
+                      say("Tai Android cmdline-tools...")
+                      z, tmp = os.path.join(os.environ.get("TEMP", path), "cmdline-tools.zip"), os.path.join(sdk, "_tmp")
+                      download(CMDLINE_URL, z)
+                      shutil.rmtree(tmp, ignore_errors=True)
+                      with zipfile.ZipFile(z) as zf:
+                          zf.extractall(tmp)
+                      os.makedirs(os.path.join(sdk, "cmdline-tools"), exist_ok=True)
+                      shutil.rmtree(os.path.join(sdk, "cmdline-tools", "latest"), ignore_errors=True)
+                      shutil.move(os.path.join(tmp, "cmdline-tools"), os.path.join(sdk, "cmdline-tools", "latest"))
+                      shutil.rmtree(tmp, ignore_errors=True)
+                      os.remove(z)
+
+                  say("Chap nhan license + tai emulator, platform-tools, system image (vai GB, doi chut)...")
+                  subprocess.run([sdkm, f"--sdk_root={sdk}", "--licenses"], input="y\n" * 40, text=True,
+                                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  r = subprocess.run([sdkm, f"--sdk_root={sdk}", "platform-tools", "emulator", img], env=env)
+                  if r.returncode != 0:
+                      raise SystemExit(f"sdkmanager loi khi tai {img}")
+
+                  say(f"Tao may ao {name} (Android {ver} / API {api})...")
+                  subprocess.run([avdm, "create", "avd", "-n", name, "-k", img, "-d", "pixel_6", "--force"],
+                                 input="no\n", text=True, env=env)
+                  if not os.path.exists(cfg):
+                      raise SystemExit("Tao AVD that bai.")
+
+                  set_ini(cfg, {
+                      "hw.ramSize": ram, "hw.cpu.ncore": cores, "disk.dataPartition.size": f"{disk}G",
+                      "vm.heapSize": 512, "hw.gpu.enabled": "yes", "hw.gpu.mode": "host",
+                      "hw.keyboard": "yes", "hw.lcd.density": 420, "hw.audioInput": "no",
+                      "hw.camera.back": "none", "hw.camera.front": "none", "showDeviceFrame": "no",
+                      "fastboot.forceColdBoot": "no", "fastboot.forceFastBoot": "yes",
+                  })
+                  say(f"Da tao xong. Config: RAM {ram}MB, Disk {disk}GB, Core {cores}", "green")
+
+              if a.no_boot:
+                  say(f"Xong (no-boot). Thu muc: {path}", "green")
+                  return
+
+              # ---- 3. boot ----
+              ini = read_ini(cfg)
+              args = [emu, "-avd", name, "-gpu", "host", "-accel", "on", "-no-boot-anim", "-netfast",
+                      "-memory", ini.get("hw.ramSize", "2048"), "-cores", ini.get("hw.cpu.ncore", "2")]
+              if a.headless:
+                  args.append("-no-window")
+              say(f"Khoi dong {name} ...")
+              flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+              subprocess.Popen(args, env=env, creationflags=flags, close_fds=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              subprocess.run([adb_exe, "start-server"], env=env, capture_output=True)
+              adb("wait-for-device", timeout=600)
+              t0 = time.time()
+              while adb("shell", "getprop", "sys.boot_completed") != "1":
+                  if time.time() - t0 > 600:
+                      raise SystemExit("Boot qua 10 phut. Kiem tra Hyper-V / Windows Hypervisor Platform da bat chua.")
+                  time.sleep(3)
+              say("Android da boot xong.", "green")
+
+              # ---- 4. root ----
+              if not a.no_root:
+                  adb("root")
+                  time.sleep(2)
+                  adb("wait-for-device")
+                  uid = adb("shell", "id")
+                  say(f"ROOT OK: {uid}" if "uid=0" in uid else f"Root that bai: {uid}", "green" if "uid=0" in uid else "red")
+
+              # ---- 5. toi uu ----
+              for k in ("window_animation_scale", "transition_animation_scale", "animator_duration_scale"):
+                  adb("shell", "settings", "put", "global", k, "0")
+              adb("shell", "settings", "put", "global", "stay_on_while_plugged_in", "7")
+              adb("shell", "settings", "put", "system", "screen_off_timeout", "1800000")
+              adb("shell", "settings", "put", "global", "development_settings_enabled", "1")
+              adb("shell", "cmd", "package", "bg-dexopt-job")
+              say(f"San sang! adb: {adb_exe}", "green")
+              say(f"Lan sau chay lai: phone.exe --path {path} --version {ver}  (boot luon, khong build)")
+
+
+          if __name__ == "__main__":
+              try:
+                  main()
+              except KeyboardInterrupt:
+                  pass
+              if getattr(sys, "frozen", False) and len(sys.argv) == 1:
+                  input("\nNhan Enter de thoat...")
+          PYEOF
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cai PyInstaller
+        run: pip install pyinstaller
+
+      - name: Kiem tra cu phap
+        run: python -m py_compile phone.py
+
+      - name: Build phone.exe
+        run: pyinstaller --onefile --name phone phone.py
+
+      - name: Smoke test exe
+        shell: pwsh
+        run: ./dist/phone.exe --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phone-exe
+          path: dist/phone.exe
+          if-no-files-found: error
+
+  # ------------------------------------------------ 2. test build -> reuse (Windows)
+  exe-test:
+    needs: build-exe
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.android_version != 'all' && format('["{0}"]', inputs.android_version) || '["12","13","14","15"]') }}
+    env:
+      STORE: ${{ inputs.storage_path || 'D:\phone' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: phone-exe
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Lan 1 - phai BUILD
+        shell: pwsh
+        run: |
+          ./phone.exe --path "$env:STORE" --version ${{ matrix.version }} --ram 2048 --disk 4 --cores 2 --auto --no-boot 2>&1 | Tee-Object run1.log
+          if ($LASTEXITCODE -ne 0) { throw "phone.exe loi (exit $LASTEXITCODE)" }
+          if (-not (Select-String -Path run1.log -Pattern '\[BUILD\]' -Quiet)) { throw 'Lan 1 phai la BUILD' }
+
+      - name: Kiem tra luu dung noi + dung RAM/Core/Disk
+        shell: pwsh
+        run: |
+          $cfg = Join-Path $env:STORE 'avd\phone-a${{ matrix.version }}.avd\config.ini'
+          if (-not (Test-Path $cfg)) { throw "Khong thay $cfg" }
+          Select-String -Path $cfg -Pattern 'hw.ramSize|hw.cpu.ncore|disk.dataPartition.size|hw.gpu.mode'
+          foreach ($p in 'hw.ramSize=2048','hw.cpu.ncore=2','disk.dataPartition.size=4G','hw.gpu.mode=host') {
+            if (-not (Select-String -Path $cfg -Pattern ([regex]::Escape($p)) -Quiet)) { throw "Config sai: thieu $p" }
+          }
+
+      - name: Lan 2 - phai REUSE (khong build lai, khong hoi lai)
+        shell: pwsh
+        run: |
+          ./phone.exe --path "$env:STORE" --version ${{ matrix.version }} --auto --no-boot 2>&1 | Tee-Object run2.log
+          if (-not (Select-String -Path run2.log -Pattern '\[REUSE\]' -Quiet)) { throw 'Lan 2 phai la REUSE' }
+          if (Select-String -Path run2.log -Pattern '\[BUILD\]' -Quiet) { throw 'Lan 2 khong duoc build lai' }
+
+      - name: Luu log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-android-${{ matrix.version }}
+          path: run*.log
+
+  # ------------------------------------------ 3. test boot + root that (Linux, KVM)
+  boot-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        api: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.android_version != 'all' && format('[{0}]', fromJSON('{"12":31,"13":33,"14":34,"15":35}')[inputs.android_version]) || '[31,33,34,35]') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bat KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Boot + root + toi uu
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          ram-size: 2048M
+          cores: 2
+          disk-size: 4096M
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: |
+            adb root
+            adb wait-for-device
+            adb shell "id | grep -q uid=0"
+            adb shell settings put global window_animation_scale 0
+            adb shell settings put global transition_animation_scale 0
+            adb shell settings put global animator_duration_scale 0
+            adb shell getprop ro.build.version.release
+
+  # ----------------------------------------------- 4. tu dong phat hanh (chi main)
+  release:
+    needs: [build-exe, exe-test, boot-test]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: phone-exe
+
+      - name: Dang len GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Virtual Phone build ${{ github.run_number }}
+          body: |
+            phone.exe - Android ao 12-15 (root + toi uu), da test tu dong.
+            Chay `phone.exe`: lan dau hoi RAM/Disk/Core roi build, cac lan sau boot luon.
+          files: phone.exe
+          make_latest: true
