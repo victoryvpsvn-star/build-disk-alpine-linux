@@ -184,6 +184,20 @@ jobs:
                                "(Neu van loi: bat Virtualization / SVM trong BIOS.)")
 
 
+          def disk_type(path):
+              """Tra ve 'SSD' / 'HDD' / '' (khong ro) cua o dia chua path."""
+              try:
+                  letter = os.path.splitdrive(path)[0].rstrip(":")
+                  if not letter.isalpha():
+                      return ""
+                  r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                      f"(Get-Partition -DriveLetter {letter} | Get-Disk | Get-PhysicalDisk).MediaType"],
+                                     capture_output=True, text=True, timeout=25)
+                  return (r.stdout or "").strip()
+              except Exception:
+                  return ""
+
+
           # ----------------------------------------------------------------------------
           def main():
               ap = argparse.ArgumentParser(prog="phone")
@@ -197,6 +211,8 @@ jobs:
               ap.add_argument("--no-boot", action="store_true")
               ap.add_argument("--headless", action="store_true")
               ap.add_argument("--auto", action="store_true", help="khong hoi, dung mac dinh/tham so")
+              ap.add_argument("--playstore", action="store_true", help="dung image co Google Play (cai Roblox...), khong root")
+              ap.add_argument("--apk", action="append", help="file .apk tu cai sau khi boot (co the dung nhieu lan)")
               a = ap.parse_args()
 
               if os.name != "nt":
@@ -207,14 +223,24 @@ jobs:
               drive = os.path.splitdrive(path)[0] + "\\"
               if not os.path.exists(drive):
                   raise SystemExit(f"O dia {drive} khong ton tai. Chon duong dan khac (vd C:\\phone).")
-              ver = a.version or ask("Chon Android (12 / 13 / 14 / 15)", "14", a.auto)
+              ver = a.version or ask("Chon Android (12 = nhe nhat | 13 = can bang | 14, 15 = nang hon)", "13", a.auto)
               if ver not in API:
                   raise SystemExit(f"Version khong hop le: {ver}")
               api = API[ver]
 
               sdk, avd_home = os.path.join(path, "sdk"), os.path.join(path, "avd")
-              name = f"phone-a{ver}"
-              img = f"system-images;android-{api};google_apis;x86_64"  # google_apis = userdebug -> adb root duoc
+              base = f"phone-a{ver}"
+              have_plain = os.path.exists(os.path.join(avd_home, f"{base}.avd", "config.ini"))
+              have_play = os.path.exists(os.path.join(avd_home, f"{base}-play.avd", "config.ini"))
+              play = a.playstore
+              if not play and not have_plain and not a.auto:
+                  play = ask("Cai Roblox/app tu Google Play? y = co Play Store (KHONG root) | n = root, khong Play Store",
+                             "y", False).lower().startswith("y")
+              elif not play and have_play and not have_plain:
+                  play = True
+              name = base + ("-play" if play else "")
+              # google_apis = userdebug -> adb root duoc | google_apis_playstore = co Play Store, khong root
+              img = f"system-images;android-{api};{'google_apis_playstore' if play else 'google_apis'};x86_64"
               for d in (sdk, avd_home, os.path.join(path, ".android")):
                   os.makedirs(d, exist_ok=True)
 
@@ -237,6 +263,12 @@ jobs:
                   say(f"[BUILD] Chua co '{name}' -> bat dau tao.", "yellow")
                   host_ram, host_cores = host_info()
                   say(f"May ban: RAM {host_ram} MB, {host_cores} core logic.")
+                  if not a.auto:
+                      t = disk_type(path)
+                      if "HDD" in t.upper():
+                          say(f"CANH BAO: o {drive} la HDD -> may ao se cham. Nen chon o SSD (vd C:\\phone).", "red")
+                      elif t:
+                          say(f"O luu tru: {t}")
                   ram = a.ram or int(ask("RAM cho may ao (MB)", min(4096, host_ram // 2), a.auto))
                   disk = a.disk or int(ask("Dung luong o dia cho may ao (GB)", 8, a.auto))
                   cores = a.cores or int(ask("So core CPU", max(2, min(4, host_cores // 2)), a.auto))
@@ -274,7 +306,11 @@ jobs:
                   set_ini(cfg, {
                       "hw.ramSize": ram, "hw.cpu.ncore": cores, "disk.dataPartition.size": f"{disk}G",
                       "vm.heapSize": 512, "hw.gpu.enabled": "yes", "hw.gpu.mode": "host",
-                      "hw.keyboard": "yes", "hw.lcd.density": 420, "hw.audioInput": "no",
+                      "hw.keyboard": "yes", "hw.audioInput": "no",
+                      "hw.lcd.width": 720, "hw.lcd.height": 1600, "hw.lcd.density": 320,
+                      "skin.name": "720x1600", "skin.path": "_no_skin",
+                      "hw.sensors.proximity": "no", "hw.sensors.magnetic_field": "no", "hw.sensors.humidity": "no",
+                      "hw.sensors.pressure": "no", "hw.sensors.temperature": "no",
                       "hw.camera.back": "none", "hw.camera.front": "none", "showDeviceFrame": "no",
                       "fastboot.forceColdBoot": "no", "fastboot.forceFastBoot": "yes",
                   })
@@ -305,12 +341,34 @@ jobs:
               say("Android da boot xong.", "green")
 
               # ---- 4. root ----
-              if not a.no_root:
+              if play:
+                  say("Ban Play Store: khong root (Play Store va Roblox can may chua root).", "yellow")
+              elif not a.no_root:
                   adb("root")
                   time.sleep(2)
                   adb("wait-for-device")
                   uid = adb("shell", "id")
                   say(f"ROOT OK: {uid}" if "uid=0" in uid else f"Root that bai: {uid}", "green" if "uid=0" in uid else "red")
+
+              # ---- 4b. cai APK trong <path>\\apks (moi file chi cai 1 lan) + mo Roblox tren Play Store ----
+              apk_dir = os.path.join(path, "apks")
+              os.makedirs(apk_dir, exist_ok=True)
+              done_f = os.path.join(apk_dir, ".installed")
+              done = set(open(done_f, encoding="utf-8").read().split("\n")) if os.path.exists(done_f) else set()
+              todo = [os.path.abspath(x) for x in (a.apk or [])]
+              todo += [os.path.join(apk_dir, x) for x in sorted(os.listdir(apk_dir)) if x.lower().endswith(".apk")]
+              for f in todo:
+                  if f in done:
+                      continue
+                  say(f"Cai {os.path.basename(f)} ...")
+                  out = adb("install", "-r", "-g", f, timeout=900)
+                  say(out or "(khong co phan hoi)", "green" if "Success" in out else "red")
+                  if "Success" in out:
+                      with open(done_f, "a", encoding="utf-8") as fh:
+                          fh.write(f + "\n")
+              if play and "com.roblox.client" not in adb("shell", "pm", "list", "packages", "com.roblox.client"):
+                  say("Mo Play Store -> Roblox: dang nhap Google roi bam Cai dat.", "yellow")
+                  adb("shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", "market://details?id=com.roblox.client")
 
               # ---- 5. toi uu ----
               for k in ("window_animation_scale", "transition_animation_scale", "animator_duration_scale"):
@@ -318,9 +376,14 @@ jobs:
               adb("shell", "settings", "put", "global", "stay_on_while_plugged_in", "7")
               adb("shell", "settings", "put", "system", "screen_off_timeout", "1800000")
               adb("shell", "settings", "put", "global", "development_settings_enabled", "1")
+              for pkg in ("com.google.android.youtube", "com.google.android.apps.maps", "com.google.android.apps.photos",
+                          "com.google.android.apps.docs", "com.google.android.videos", "com.google.android.music",
+                          "com.google.android.gm", "com.google.android.apps.youtube.music", "com.google.android.apps.tachyon",
+                          "com.google.android.apps.messaging", "com.google.android.apps.wellbeing") if not play else ():
+                  adb("shell", "pm", "disable-user", "--user", "0", pkg)   # tat app nen khong can (bo qua neu khong co)
               adb("shell", "cmd", "package", "bg-dexopt-job")
               say(f"San sang! adb: {adb_exe}", "green")
-              say(f"Lan sau chay lai: phone.exe --path {path} --version {ver}  (boot luon, khong build)")
+              say(f"Lan sau chay lai: phone.exe --path {path} --version {ver}{' --playstore' if play else ''}  (boot luon, khong build)")
 
 
           if __name__ == "__main__":
@@ -382,8 +445,8 @@ jobs:
         run: |
           CFG="$(cygpath -u "$STORE")/avd/phone-a${{ matrix.version }}.avd/config.ini"
           test -f "$CFG" || { echo "Khong thay $CFG"; ls -R "$(cygpath -u "$STORE")" | head -50; exit 1; }
-          grep -E 'hw.ramSize|hw.cpu.ncore|disk.dataPartition.size|hw.gpu.mode' "$CFG"
-          for p in 'hw.ramSize=2048' 'hw.cpu.ncore=2' 'disk.dataPartition.size=4G' 'hw.gpu.mode=host'; do
+          grep -E 'hw.ramSize|hw.cpu.ncore|disk.dataPartition.size|hw.gpu.mode|hw.lcd' "$CFG"
+          for p in 'hw.ramSize=2048' 'hw.cpu.ncore=2' 'disk.dataPartition.size=4G' 'hw.gpu.mode=host' 'hw.lcd.width=720'; do
             tr -d '\r' < "$CFG" | grep -qxF "$p" || { echo "Config sai: thieu $p"; exit 1; }
           done
 
@@ -393,6 +456,16 @@ jobs:
           ./phone.exe --path "$STORE" --version ${{ matrix.version }} --auto --no-boot 2>&1 | tee run2.log
           grep -q '\[REUSE\]' run2.log || { echo 'Lan 2 phai la REUSE'; exit 1; }
           ! grep -q '\[BUILD\]' run2.log || { echo 'Lan 2 khong duoc build lai'; exit 1; }
+
+      - name: Ban Play Store (de cai Roblox) - chi Android 15
+        if: matrix.version == '15'
+        shell: bash
+        run: |
+          ./phone.exe --path "$STORE" --version 15 --playstore --ram 2048 --disk 4 --cores 2 --auto --no-boot 2>&1 | tee run3.log
+          grep -q '\[BUILD\]' run3.log || { echo 'Ban Play Store phai duoc BUILD'; exit 1; }
+          CFG="$(cygpath -u "$STORE")/avd/phone-a15-play.avd/config.ini"
+          test -f "$CFG" || { echo "Khong thay $CFG"; exit 1; }
+          tr -d '\r' < "$CFG" | grep -qi '^PlayStore.enabled=true' || { echo 'Image khong co Play Store'; exit 1; }
 
       - name: Luu log
         if: always()
