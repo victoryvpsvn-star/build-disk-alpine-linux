@@ -314,6 +314,8 @@ jobs:
                       "hw.camera.back": "none", "hw.camera.front": "none", "showDeviceFrame": "no",
                       "fastboot.forceColdBoot": "no", "fastboot.forceFastBoot": "yes",
                   })
+                  if play:
+                      set_ini(cfg, {"PlayStore.enabled": "true"})
                   say(f"Da tao xong. Config: RAM {ram}MB, Disk {disk}GB, Core {cores}", "green")
 
               if a.no_boot:
@@ -465,7 +467,11 @@ jobs:
           grep -q '\[BUILD\]' run3.log || { echo 'Ban Play Store phai duoc BUILD'; exit 1; }
           CFG="$(cygpath -u "$STORE")/avd/phone-a15-play.avd/config.ini"
           test -f "$CFG" || { echo "Khong thay $CFG"; exit 1; }
-          tr -d '\r' < "$CFG" | grep -qi '^PlayStore.enabled=true' || { echo 'Image khong co Play Store'; exit 1; }
+          SDKDIR="$(cygpath -u "$STORE")/sdk/system-images/android-35/google_apis_playstore/x86_64"
+          test -d "$SDKDIR" || { echo "Khong thay image Play Store: $SDKDIR"; exit 1; }
+          echo "--- dong lien quan Play Store trong config.ini ---"
+          tr -d '\r' < "$CFG" | grep -i 'playstore\|tag.id\|image.sysdir' || true
+          tr -d '\r' < "$CFG" | grep -qi '^PlayStore.enabled *= *true' || { echo 'PlayStore.enabled chua bat'; exit 1; }
 
       - name: Luu log
         if: always()
