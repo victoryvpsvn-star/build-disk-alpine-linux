@@ -622,6 +622,19 @@ jobs:
           tr -d '\r' < "$CFG" | grep -i 'playstore\|tag.id\|image.sysdir' || true
           tr -d '\r' < "$CFG" | grep -qi '^PlayStore.enabled *= *true' || { echo 'PlayStore.enabled chua bat'; exit 1; }
 
+      - name: Gom log + in 40 dong cuoi (de thay loi ngay trong job)
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p logs-out
+          cp "$(cygpath -u "$STORE")"/logs/*.log logs-out/ 2>/dev/null || echo "(khong co log trong $STORE/logs)"
+          for f in logs-out/*.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$f (40 dong cuoi)"
+            tail -n 40 "$f"
+            echo "::endgroup::"
+          done
+
       - name: Luu log
         if: always()
         uses: actions/upload-artifact@v4
@@ -629,7 +642,7 @@ jobs:
           name: logs-android-${{ matrix.version }}
           path: |
             run*.log
-            ${{ env.STORE }}/logs/*.log
+            logs-out/*.log
 
   # ------------------------------------------ 3. test boot + root that (Linux, KVM)
   boot-test:
