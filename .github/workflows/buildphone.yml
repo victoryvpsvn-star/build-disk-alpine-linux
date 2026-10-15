@@ -58,10 +58,13 @@ jobs:
           import argparse
           import ctypes
           import os
+          import platform
+          import re
           import shutil
           import subprocess
           import sys
           import time
+          import traceback
           import urllib.request
           import zipfile
 
@@ -76,8 +79,90 @@ jobs:
           C = {"cyan": "36", "green": "32", "yellow": "33", "red": "31"}
 
 
+          DEBUG = True      # mac dinh BAT debug. Them --quiet de tat
+          LOGF = None
+          T0 = time.time()
+          _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+          _PROG = re.compile(r"(\d+)% (.*?)\s*$")
+
+
+          def _ts():
+              s = int(time.time() - T0)
+              return f"[{s // 60:02d}:{s % 60:02d}] "
+
+
+          def _log(line):
+              if LOGF:
+                  try:
+                      LOGF.write(_ANSI.sub("", line) + "\n")
+                      LOGF.flush()
+                  except Exception:
+                      pass
+
+
           def say(msg, color="cyan"):
-              print(f"\033[{C[color]}m{msg}\033[0m", flush=True)
+              line = _ts() + msg
+              print(f"\033[{C[color]}m{line}\033[0m", flush=True)
+              _log(line)
+
+
+          def dbg(msg):
+              line = "  [dbg] " + _ts() + msg
+              _log(line)
+              if DEBUG:
+                  print(f"\033[90m{line}\033[0m", flush=True)
+
+
+          def open_log(path):
+              global LOGF
+              d = os.path.join(path, "logs")
+              os.makedirs(d, exist_ok=True)
+              LOGF = open(os.path.join(d, time.strftime("phone-%Y%m%d-%H%M%S.log")), "w", encoding="utf-8", errors="replace")
+              return LOGF.name, d
+
+
+          def run(cmd, env=None, shell=False, input=None, echo=True):
+              """Chay lenh, in + ghi log toan bo output (loc bot dong tien do), tra ve exit code."""
+              dbg("$ " + (cmd if isinstance(cmd, str) else " ".join(cmd)))
+              t = time.time()
+              p = subprocess.Popen(cmd, env=env, shell=shell, stdin=subprocess.PIPE if input else None,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, encoding="utf-8", errors="replace", bufsize=1)
+              if input:
+                  try:
+                      p.stdin.write(input)
+                      p.stdin.close()
+                  except Exception:
+                      pass
+              last_act, last_pct = None, -100
+              for raw in p.stdout:
+                  line = raw.rstrip()
+                  if not line.strip():
+                      continue
+                  m = _PROG.search(line) if line.lstrip().startswith("[") else None
+                  if m:   # dong thanh tien do: chi hien moi 5%
+                      pct, act = int(m.group(1)), re.sub(r"\.\.\. .*$", "...", m.group(2))[:40]
+                      if act == last_act and pct < last_pct + 5 and pct < 100:
+                          continue
+                      last_act, last_pct = act, pct
+                  _log(line)
+                  if echo:
+                      print(line, flush=True)
+              p.wait()
+              dbg(f"  -> exit {p.returncode} ({time.time() - t:.0f}s)")
+              return p.returncode
+
+
+          def env_dump(path):
+              dbg(f"{platform.platform()} | python {platform.python_version()} | exe={getattr(sys, 'frozen', False)}")
+              dbg("args: " + " ".join(sys.argv[1:]))
+              try:
+                  ram, cores = host_info()
+                  dbg(f"may: RAM {ram} MB, {cores} core logic")
+                  du = shutil.disk_usage(os.path.splitdrive(path)[0] + "\\")
+                  dbg(f"o dia: trong {du.free / 2**30:.1f} GB / tong {du.total / 2**30:.1f} GB | loai: {disk_type(path) or 'khong ro'}")
+              except Exception as e:
+                  dbg(f"khong doc duoc thong tin may: {e}")
 
 
           def ask(msg, default, auto):
@@ -131,19 +216,26 @@ jobs:
 
 
           def download(url, dest):
+              dbg(f"GET {url}")
               req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (phone.exe)"})
+              t = time.time()
               with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
-                  total, got, last = int(r.headers.get("Content-Length") or 0), 0, -1
+                  total = int(r.headers.get("Content-Length") or 0)
+                  got, nxt = 0, 10
                   while True:
                       b = r.read(1 << 20)
                       if not b:
                           break
                       f.write(b)
                       got += len(b)
-                      pct = got * 100 // total if total else -1
-                      if total and pct != last and pct % 10 == 0:
-                          print(f"  tai... {pct}%", flush=True)
-                          last = pct
+                      el = max(time.time() - t, 0.1)
+                      sp = got / el / 2**20
+                      if total and got * 100 // total >= nxt:
+                          eta = int((total - got) / max(got / el, 1))
+                          say(f"  tai {got * 100 // total}% ({got >> 20}/{total >> 20} MB) {sp:.1f} MB/s, con ~{eta}s")
+                          nxt += 10
+              el = max(time.time() - t, 0.1)
+              say(f"  xong {got >> 20} MB trong {el:.0f}s ({got / el / 2**20:.1f} MB/s)")
 
 
           # ----------------------------------------------------------------------------
@@ -174,6 +266,7 @@ jobs:
               """Emulator can ao hoa CPU. Tu kiem tra, tu bat Windows Hypervisor Platform neu co quyen Admin."""
               r = subprocess.run([emu, "-accel-check"], capture_output=True, text=True, env=env)
               out = ((r.stdout or "") + (r.stderr or "")).lower()
+              dbg("accel-check: " + out.strip().replace("\n", " | ")[:300])
               if r.returncode == 0 and "usable" in out:
                   return
               say("Chua bat ao hoa (Windows Hypervisor Platform). Dang thu bat...", "yellow")
@@ -200,6 +293,7 @@ jobs:
 
           # ----------------------------------------------------------------------------
           def main():
+              global DEBUG
               ap = argparse.ArgumentParser(prog="phone")
               ap.add_argument("cmd", nargs="?", default="run", choices=["run"])
               ap.add_argument("--path")
@@ -210,10 +304,12 @@ jobs:
               ap.add_argument("--no-root", action="store_true")
               ap.add_argument("--no-boot", action="store_true")
               ap.add_argument("--headless", action="store_true")
+              ap.add_argument("--quiet", action="store_true", help="tat debug (mac dinh debug BAT, log o <path>\\logs)")
               ap.add_argument("--auto", action="store_true", help="khong hoi, dung mac dinh/tham so")
               ap.add_argument("--playstore", action="store_true", help="dung image co Google Play (cai Roblox...), khong root")
               ap.add_argument("--apk", action="append", help="file .apk tu cai sau khi boot (co the dung nhieu lan)")
               a = ap.parse_args()
+              DEBUG = not a.quiet
 
               if os.name != "nt":
                   raise SystemExit("Ban exe nay chay tren Windows.")
@@ -223,6 +319,10 @@ jobs:
               drive = os.path.splitdrive(path)[0] + "\\"
               if not os.path.exists(drive):
                   raise SystemExit(f"O dia {drive} khong ton tai. Chon duong dan khac (vd C:\\phone).")
+              os.makedirs(path, exist_ok=True)
+              logfile, logdir = open_log(path)
+              say(f"DEBUG {'BAT' if DEBUG else 'TAT'} | log: {logfile}", "yellow")
+              env_dump(path)
               ver = a.version or ask("Chon Android (12 = nhe nhat | 13 = can bang | 14, 15 = nang hon)", "13", a.auto)
               if ver not in API:
                   raise SystemExit(f"Version khong hop le: {ver}")
@@ -253,8 +353,17 @@ jobs:
               cfg = os.path.join(avd_home, f"{name}.avd", "config.ini")
 
               def adb(*args, timeout=60):
-                  r = subprocess.run([adb_exe, *args], capture_output=True, text=True, timeout=timeout, env=env)
-                  return (r.stdout or "").strip()
+                  try:
+                      r = subprocess.run([adb_exe, *args], capture_output=True, text=True, errors="replace",
+                                         timeout=timeout, env=env)
+                  except subprocess.TimeoutExpired:
+                      dbg(f"adb {' '.join(args)} -> TIMEOUT {timeout}s")
+                      return ""
+                  out = (r.stdout or "").strip()
+                  if args[:3] != ("shell", "getprop", "sys.boot_completed"):
+                      err = (r.stderr or "").strip()
+                      dbg(f"adb {' '.join(args)} -> {out[:160]!r}" + (f" | err: {err[:160]!r}" if err else ""))
+                  return out
 
               # ---- 2. da co -> reuse ----
               if os.path.exists(cfg) and os.path.exists(emu):
@@ -263,6 +372,9 @@ jobs:
                   say(f"[BUILD] Chua co '{name}' -> bat dau tao.", "yellow")
                   host_ram, host_cores = host_info()
                   say(f"May ban: RAM {host_ram} MB, {host_cores} core logic.")
+                  free_gb = shutil.disk_usage(drive).free / 2**30
+                  if free_gb < 12:
+                      say(f"CANH BAO: o {drive} chi con {free_gb:.1f} GB trong (can ~12 GB cho SDK + image + may ao).", "red")
                   if not a.auto:
                       t = disk_type(path)
                       if "HDD" in t.upper():
@@ -291,15 +403,13 @@ jobs:
                       os.remove(z)
 
                   say("Chap nhan license + tai emulator, platform-tools, system image (vai GB, doi chut)...")
-                  subprocess.run(f'"{sdkm}" --sdk_root="{sdk}" --licenses', input="y\n" * 40, text=True, shell=True,
-                                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  r = subprocess.run(f'"{sdkm}" --sdk_root="{sdk}" "platform-tools" "emulator" "{img}"', shell=True, env=env)
-                  if r.returncode != 0:
-                      raise SystemExit(f"sdkmanager loi khi tai {img}")
+                  run(f'"{sdkm}" --sdk_root="{sdk}" --licenses', env=env, shell=True, input="y\n" * 40, echo=False)
+                  vb = " --verbose" if DEBUG else ""
+                  if run(f'"{sdkm}" --sdk_root="{sdk}"{vb} "platform-tools" "emulator" "{img}"', env=env, shell=True) != 0:
+                      raise SystemExit(f"sdkmanager loi khi tai {img} (xem log o tren)")
 
                   say(f"Tao may ao {name} (Android {ver} / API {api})...")
-                  subprocess.run(f'"{avdm}" create avd -n "{name}" -k "{img}" -d pixel_6 --force',
-                                 input="no\n", text=True, shell=True, env=env)
+                  run(f'"{avdm}" create avd -n "{name}" -k "{img}" -d pixel_6 --force', env=env, shell=True, input="no\n")
                   if not os.path.exists(cfg):
                       raise SystemExit("Tao AVD that bai.")
 
@@ -329,18 +439,43 @@ jobs:
                       "-memory", ini.get("hw.ramSize", "2048"), "-cores", ini.get("hw.cpu.ncore", "2")]
               if a.headless:
                   args.append("-no-window")
-              say(f"Khoi dong {name} ...")
+              if DEBUG:
+                  args.append("-verbose")
+              elog = os.path.join(logdir, time.strftime("emulator-%Y%m%d-%H%M%S.log"))
+              say(f"Khoi dong {name} ... (log emulator: {elog})")
+              dbg("lenh: " + " ".join(args))
               flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-              subprocess.Popen(args, env=env, creationflags=flags, close_fds=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              with open(elog, "wb") as ef:
+                  proc = subprocess.Popen(args, env=env, creationflags=flags, close_fds=True, stdout=ef, stderr=subprocess.STDOUT)
               subprocess.run([adb_exe, "start-server"], env=env, capture_output=True)
-              adb("wait-for-device", timeout=600)
-              t0 = time.time()
+
+              def dump_fail():
+                  say("---- 40 dong cuoi log emulator ----", "red")
+                  try:
+                      tail = "\n".join(open(elog, errors="replace").read().splitlines()[-40:])
+                      print(tail)
+                      _log(tail)
+                  except Exception as e:
+                      print(e)
+                  say("---- logcat (80 dong cuoi) ----", "red")
+                  lc = adb("logcat", "-d", "-t", "80", timeout=30)
+                  print(lc)
+                  _log(lc)
+
+              t0, lastp = time.time(), 0
               while adb("shell", "getprop", "sys.boot_completed") != "1":
-                  if time.time() - t0 > 600:
-                      raise SystemExit("Boot qua 10 phut. Kiem tra Hyper-V / Windows Hypervisor Platform da bat chua.")
+                  el = time.time() - t0
+                  if proc.poll() not in (None, 0):
+                      dump_fail()
+                      raise SystemExit(f"Emulator thoat som (ma {proc.returncode}). Xem log: {elog}")
+                  if el > 600:
+                      dump_fail()
+                      raise SystemExit("Boot qua 10 phut. Kiem tra Windows Hypervisor Platform / BIOS. Xem log: " + elog)
+                  if el - lastp >= 30:
+                      lastp = el
+                      dbg(f"dang cho boot... {int(el)}s")
                   time.sleep(3)
-              say("Android da boot xong.", "green")
+              say(f"Android da boot xong sau {int(time.time() - t0)}s.", "green")
 
               # ---- 4. root ----
               if play:
@@ -389,12 +524,26 @@ jobs:
 
 
           if __name__ == "__main__":
+              rc = 0
               try:
                   main()
               except KeyboardInterrupt:
                   pass
-              if getattr(sys, "frozen", False) and len(sys.argv) == 1:
+              except SystemExit as e:
+                  if e.code not in (None, 0):
+                      say(f"LOI: {e.code}", "red")
+                      rc = 1
+              except Exception:
+                  say("LOI KHONG MONG DOI:", "red")
+                  tb = traceback.format_exc()
+                  print(tb)
+                  _log(tb)
+                  rc = 1
+              if LOGF:
+                  say(f"Log chi tiet: {LOGF.name}")
+              if getattr(sys, "frozen", False) and (len(sys.argv) == 1 or rc) and sys.stdin and sys.stdin.isatty():
                   input("\nNhan Enter de thoat...")
+              sys.exit(rc)
           PYEOF
 
       - uses: actions/setup-python@v5
@@ -478,7 +627,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: logs-android-${{ matrix.version }}
-          path: run*.log
+          path: |
+            run*.log
+            ${{ env.STORE }}/logs/*.log
 
   # ------------------------------------------ 3. test boot + root that (Linux, KVM)
   boot-test:
