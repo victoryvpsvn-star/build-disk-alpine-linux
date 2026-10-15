@@ -3012,7 +3012,9 @@ jobs:
       - name: Kiểm tra cú pháp
         run: |
           python -c "import ast; ast.parse(open('agent.py',encoding='utf-8').read()); print('OK: agent.py hop le')"
-          node --check server.js && echo "OK: server.js hop le"
+          node --check server.js
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          echo "OK: server.js hop le"
 
       - name: Tải libopus-0.dll
         shell: pwsh
