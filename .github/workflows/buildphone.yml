@@ -347,6 +347,12 @@ jobs:
               ver = a.version or ask("Chon Android (12 = nhe nhat | 13 = can bang | 14, 15 = nang hon)", "13", a.auto)
               if ver not in API:
                   raise SystemExit(f"Version khong hop le: {ver}")
+              if ver in ("14", "15") and not a.auto:
+                  try:
+                      if host_info()[0] <= 8300:
+                          say("Goi y: may <= 8 GB RAM, Android 14/15 rat nang -> Android 12 hoac 13 se muot hon nhieu.", "yellow")
+                  except Exception:
+                      pass
               api = API[ver]
 
               sdk, avd_home = os.path.join(path, "sdk"), os.path.join(path, "avd")
@@ -403,9 +409,13 @@ jobs:
                           say(f"CANH BAO: o {drive} la HDD -> may ao se cham. Nen chon o SSD (vd C:\\phone).", "red")
                       elif t:
                           say(f"O luu tru: {t}")
-                  ram = a.ram or int(ask("RAM cho may ao (MB)", min(4096, host_ram // 2), a.auto))
+                  ram = a.ram or int(ask("RAM cho may ao (MB) - nen <= 40% RAM may", max(2048, min(4096, round(host_ram * 0.35 / 256) * 256)), a.auto))
                   disk = a.disk or int(ask(f"Dung luong o dia cho may ao (GB, toi da ~{max_disk})", min(8, max(2, max_disk)), a.auto))
-                  cores = a.cores or int(ask("So core CPU", max(2, min(4, host_cores // 2)), a.auto))
+                  cores = a.cores or int(ask("So core CPU - nen <= 1/2 core may", max(2, min(4, host_cores // 2)), a.auto))
+                  if ram > host_ram * 0.5:
+                      say(f"CANH BAO: cap {ram} MB tren may chi co {host_ram} MB -> Windows thieu RAM se rat lag. Nen <= {int(host_ram * 0.4)} MB.", "red")
+                  if cores > max(2, host_cores - 2):
+                      say(f"CANH BAO: cap {cores}/{host_cores} core -> may chu bi tranh CPU, de lag. Nen {max(2, host_cores // 2)} core.", "red")
                   if ram < 1536 or disk < 2 or cores < 1:
                       raise SystemExit("Toi thieu: RAM 1536 MB, Disk 2 GB, Core 1.")
                   if max_disk < 2:
@@ -462,6 +472,14 @@ jobs:
 
               # ---- 3. boot ----
               ensure_accel(emu, env)
+              upd = {}
+              if a.ram:
+                  upd["hw.ramSize"] = a.ram
+              if a.cores:
+                  upd["hw.cpu.ncore"] = a.cores
+              if upd:
+                  say(f"Cap nhat may ao: {upd}")
+                  set_ini(cfg, upd)
               ini = read_ini(cfg)
               mm = re.match(r"(\d+)\s*([GM])", ini.get("disk.dataPartition.size", ""), re.I)
               if mm and not os.path.exists(os.path.join(avd_home, f"{name}.avd", "userdata-qemu.img")):
@@ -472,7 +490,7 @@ jobs:
                       say(f"Disk may ao {size_gb:.0f} GB > cho trong ({free_now:.0f} GB, emulator can them ~13 GB) -> tu giam xuong {new} GB.", "red")
                       set_ini(cfg, {"disk.dataPartition.size": f"{new}G"})
                       ini = read_ini(cfg)
-              args = [emu, "-avd", name, "-gpu", "host", "-accel", "on", "-no-boot-anim", "-netfast",
+              args = [emu, "-avd", name, "-gpu", "host", "-accel", "on", "-no-boot-anim",
                       "-memory", ini.get("hw.ramSize", "2048"), "-cores", ini.get("hw.cpu.ncore", "2")]
               if a.headless:
                   args.append("-no-window")
@@ -567,8 +585,8 @@ jobs:
                           "com.google.android.gm", "com.google.android.apps.youtube.music", "com.google.android.apps.tachyon",
                           "com.google.android.apps.messaging", "com.google.android.apps.wellbeing") if not play else ():
                   adb("shell", "pm", "disable-user", "--user", "0", pkg)   # tat app nen khong can (bo qua neu khong co)
-              adb("shell", "cmd", "package", "bg-dexopt-job")
               say(f"San sang! adb: {adb_exe}", "green")
+              say("Meo: tat may ao bang nut X cua cua so emulator (dung kill) de luu snapshot -> lan sau boot nhanh.")
               say(f"Lan sau chay lai: phone.exe --path {path} --version {ver}{' --playstore' if play else ''}  (boot luon, khong build)")
 
 
