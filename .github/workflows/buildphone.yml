@@ -325,6 +325,7 @@ jobs:
               ap.add_argument("--no-boot", action="store_true")
               ap.add_argument("--headless", action="store_true")
               ap.add_argument("--quiet", action="store_true", help="tat debug (mac dinh debug BAT, log o <path>\\logs)")
+              ap.add_argument("--gpu", default="host", help="host (mac dinh) | angle_indirect | swiftshader_indirect (CPU, cham)")
               ap.add_argument("--auto", action="store_true", help="khong hoi, dung mac dinh/tham so")
               ap.add_argument("--playstore", action="store_true", help="dung image co Google Play (cai Roblox...), khong root")
               ap.add_argument("--apk", action="append", help="file .apk tu cai sau khi boot (co the dung nhieu lan)")
@@ -410,7 +411,7 @@ jobs:
                       elif t:
                           say(f"O luu tru: {t}")
                   ram = a.ram or int(ask("RAM cho may ao (MB) - nen <= 40% RAM may", max(2048, min(4096, round(host_ram * 0.35 / 256) * 256)), a.auto))
-                  disk = a.disk or int(ask(f"Dung luong o dia cho may ao (GB, toi da ~{max_disk})", min(8, max(2, max_disk)), a.auto))
+                  disk = a.disk or int(ask(f"Dung luong o dia cho may ao (GB, toi da ~{max_disk}; 8-16 la du, cang lon boot dau cang lau)", min(8, max(2, max_disk)), a.auto))
                   cores = a.cores or int(ask("So core CPU - nen <= 1/2 core may", max(2, min(4, host_cores // 2)), a.auto))
                   if ram > host_ram * 0.5:
                       say(f"CANH BAO: cap {ram} MB tren may chi co {host_ram} MB -> Windows thieu RAM se rat lag. Nen <= {int(host_ram * 0.4)} MB.", "red")
@@ -453,7 +454,7 @@ jobs:
 
                   set_ini(cfg, {
                       "hw.ramSize": ram, "hw.cpu.ncore": cores, "disk.dataPartition.size": f"{disk}G",
-                      "vm.heapSize": 512, "hw.gpu.enabled": "yes", "hw.gpu.mode": "host",
+                      "vm.heapSize": 576, "hw.gpu.enabled": "yes", "hw.gpu.mode": "host",
                       "hw.keyboard": "yes", "hw.audioInput": "no",
                       "hw.lcd.width": 720, "hw.lcd.height": 1600, "hw.lcd.density": 320,
                       "skin.name": "720x1600", "skin.path": "_no_skin",
@@ -486,12 +487,15 @@ jobs:
                   size_gb = int(mm.group(1)) / (1024 if mm.group(2).upper() == "M" else 1)
                   free_now = shutil.disk_usage(drive).free / 2**30
                   if size_gb + 14 > free_now:
-                      new = max(2, int(free_now - 14))
+                      new = max(2, min(int(free_now - 14), 24))
                       say(f"Disk may ao {size_gb:.0f} GB > cho trong ({free_now:.0f} GB, emulator can them ~13 GB) -> tu giam xuong {new} GB.", "red")
                       set_ini(cfg, {"disk.dataPartition.size": f"{new}G"})
                       ini = read_ini(cfg)
-              args = [emu, "-avd", name, "-gpu", "host", "-accel", "on", "-no-boot-anim",
+              args = [emu, "-avd", name, "-gpu", a.gpu, "-accel", "on", "-no-boot-anim",
                       "-memory", ini.get("hw.ramSize", "2048"), "-cores", ini.get("hw.cpu.ncore", "2")]
+              if a.gpu in ("host", "angle_indirect", "auto"):
+                  # Log cho thay Google "server flags" ep ForceSwiftshader -> render bang CPU -> lag. Tat co do.
+                  args += ["-feature", "-ForceSwiftshader"]
               if a.headless:
                   args.append("-no-window")
               if DEBUG:
@@ -543,6 +547,15 @@ jobs:
                       dbg(f"dang cho boot... {int(el)}s")
                   time.sleep(3)
               say(f"Android da boot xong sau {int(time.time() - t0)}s.", "green")
+              try:
+                  mg = re.search(r"Graphics Adapter Android Emulator OpenGL ES Translator \(([^)]*)\)", open(elog, errors="replace").read())
+                  if mg and "swiftshader" in mg.group(1).lower():
+                      say("CANH BAO: dang render bang CPU (SwiftShader) -> rat lag. Cap nhat driver card do hoa (Intel/NVIDIA/AMD), "
+                          "hoac thu: phone.exe --gpu angle_indirect", "red")
+                  elif mg:
+                      say(f"Render bang GPU: {mg.group(1)}", "green")
+              except Exception:
+                  pass
 
               # ---- 4. root ----
               if play:
