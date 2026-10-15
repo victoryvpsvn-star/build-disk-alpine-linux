@@ -21,7 +21,7 @@ on:
       control_url:
         description: 'URL server web control'
         required: false
-        default: 'https://control.bot-keep.xyz'
+        default: 'https://bvwqmiv7phoi.ramnaymcloud.com'
         type: string
       agent_key:
         description: 'Key cho agent (khớp AGENT_KEY bên server, rỗng = không cần)'
