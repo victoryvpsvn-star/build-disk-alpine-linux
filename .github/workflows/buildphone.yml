@@ -160,7 +160,7 @@ jobs:
                   ram, cores = host_info()
                   dbg(f"may: RAM {ram} MB, {cores} core logic")
                   du = shutil.disk_usage(os.path.splitdrive(path)[0] + "\\")
-                  dbg(f"o dia: trong {du.free / 2**30:.1f} GB / tong {du.total / 2**30:.1f} GB | loai: {disk_type(path) or 'khong ro'}")
+                  dbg(f"o dia: trong {du.free / 2**30:.1f} GB / tong {du.total / 2**30:.1f} GB")
               except Exception as e:
                   dbg(f"khong doc duoc thong tin may: {e}")
 
@@ -277,16 +277,36 @@ jobs:
                                "(Neu van loi: bat Virtualization / SVM trong BIOS.)")
 
 
+          _DT = {}
+
+
+          def enable_ansi():
+              """Bat mau ANSI tren console Windows (khong con hien ra ky tu la <-[33m)."""
+              try:
+                  k = ctypes.windll.kernel32
+                  for std in (-11, -12):
+                      h = k.GetStdHandle(std)
+                      mode = ctypes.c_ulong()
+                      if k.GetConsoleMode(h, ctypes.byref(mode)):
+                          k.SetConsoleMode(h, mode.value | 4)
+              except Exception:
+                  pass
+
+
+
           def disk_type(path):
               """Tra ve 'SSD' / 'HDD' / '' (khong ro) cua o dia chua path."""
               try:
                   letter = os.path.splitdrive(path)[0].rstrip(":")
                   if not letter.isalpha():
                       return ""
+                  if letter in _DT:
+                      return _DT[letter]
                   r = subprocess.run(["powershell", "-NoProfile", "-Command",
                                       f"(Get-Partition -DriveLetter {letter} | Get-Disk | Get-PhysicalDisk).MediaType"],
                                      capture_output=True, text=True, timeout=25)
-                  return (r.stdout or "").strip()
+                  _DT[letter] = (r.stdout or "").strip()
+                  return _DT[letter]
               except Exception:
                   return ""
 
@@ -313,6 +333,7 @@ jobs:
 
               if os.name != "nt":
                   raise SystemExit("Ban exe nay chay tren Windows.")
+              enable_ansi()
 
               # ---- 1. noi luu ----
               path = (a.path or ask("Luu virtual phone o dau? (vd D:\\phone hoac C:\\phone)", "D:\\phone", a.auto)).rstrip("\\/")
@@ -373,6 +394,7 @@ jobs:
                   host_ram, host_cores = host_info()
                   say(f"May ban: RAM {host_ram} MB, {host_cores} core logic.")
                   free_gb = shutil.disk_usage(drive).free / 2**30
+                  max_disk = int(free_gb - 20)   # tru ~6 GB SDK/image se tai + ~13 GB emulator can them
                   if free_gb < 12:
                       say(f"CANH BAO: o {drive} chi con {free_gb:.1f} GB trong (can ~12 GB cho SDK + image + may ao).", "red")
                   if not a.auto:
@@ -382,10 +404,16 @@ jobs:
                       elif t:
                           say(f"O luu tru: {t}")
                   ram = a.ram or int(ask("RAM cho may ao (MB)", min(4096, host_ram // 2), a.auto))
-                  disk = a.disk or int(ask("Dung luong o dia cho may ao (GB)", 8, a.auto))
+                  disk = a.disk or int(ask(f"Dung luong o dia cho may ao (GB, toi da ~{max_disk})", min(8, max(2, max_disk)), a.auto))
                   cores = a.cores or int(ask("So core CPU", max(2, min(4, host_cores // 2)), a.auto))
                   if ram < 1536 or disk < 2 or cores < 1:
                       raise SystemExit("Toi thieu: RAM 1536 MB, Disk 2 GB, Core 1.")
+                  if max_disk < 2:
+                      raise SystemExit(f"O {drive} chi con {free_gb:.0f} GB trong, khong du (can it nhat ~22 GB). Chon o khac hoac giai phong dung luong.")
+                  if disk > max_disk:
+                      say(f"Disk {disk} GB qua lon: o {drive} chi con {free_gb:.0f} GB trong (emulator can them ~13 GB). "
+                          f"Tu giam xuong {max_disk} GB.", "red")
+                      disk = max_disk
 
                   ensure_java(path, env)
 
@@ -435,6 +463,15 @@ jobs:
               # ---- 3. boot ----
               ensure_accel(emu, env)
               ini = read_ini(cfg)
+              mm = re.match(r"(\d+)\s*([GM])", ini.get("disk.dataPartition.size", ""), re.I)
+              if mm and not os.path.exists(os.path.join(avd_home, f"{name}.avd", "userdata-qemu.img")):
+                  size_gb = int(mm.group(1)) / (1024 if mm.group(2).upper() == "M" else 1)
+                  free_now = shutil.disk_usage(drive).free / 2**30
+                  if size_gb + 14 > free_now:
+                      new = max(2, int(free_now - 14))
+                      say(f"Disk may ao {size_gb:.0f} GB > cho trong ({free_now:.0f} GB, emulator can them ~13 GB) -> tu giam xuong {new} GB.", "red")
+                      set_ini(cfg, {"disk.dataPartition.size": f"{new}G"})
+                      ini = read_ini(cfg)
               args = [emu, "-avd", name, "-gpu", "host", "-accel", "on", "-no-boot-anim", "-netfast",
                       "-memory", ini.get("hw.ramSize", "2048"), "-cores", ini.get("hw.cpu.ncore", "2")]
               if a.headless:
@@ -450,17 +487,29 @@ jobs:
               subprocess.run([adb_exe, "start-server"], env=env, capture_output=True)
 
               def dump_fail():
-                  say("---- 40 dong cuoi log emulator ----", "red")
                   try:
-                      tail = "\n".join(open(elog, errors="replace").read().splitlines()[-40:])
-                      print(tail)
-                      _log(tail)
-                  except Exception as e:
-                      print(e)
-                  say("---- logcat (80 dong cuoi) ----", "red")
-                  lc = adb("logcat", "-d", "-t", "80", timeout=30)
-                  print(lc)
-                  _log(lc)
+                      lines = open(elog, errors="replace").read().splitlines()
+                  except Exception as ex:
+                      lines = []
+                      say(f"Khong doc duoc log emulator: {ex}", "red")
+                  errs = [x for x in lines if re.search(r"FATAL|PANIC|ERROR|Not enough|failed|cannot", x, re.I)]
+                  say("---- LOI CHINH trong log emulator ----", "red")
+                  for x in errs[-8:] or lines[-8:]:
+                      say(x.strip(), "red")
+                  text = "\n".join(lines)
+                  if "Not enough space" in text:
+                      say("GOI Y: het cho trong o dia -> chay lai voi Disk nho hon (vd --disk 16) hoac chon o con nhieu cho trong.", "yellow")
+                  if re.search(r"whpx|hax|hypervisor|vt-x|virtualization", text, re.I) and "FATAL" in text:
+                      say("GOI Y: ao hoa CPU co van de -> bat Windows Hypervisor Platform / Virtualization trong BIOS.", "yellow")
+                  say("---- 15 dong cuoi log emulator ----", "red")
+                  tail = "\n".join(lines[-15:])
+                  print(tail)
+                  _log(tail)
+                  if proc.poll() is None:
+                      say("---- logcat (80 dong cuoi) ----", "red")
+                      lc = adb("logcat", "-d", "-t", "80", timeout=30)
+                      print(lc)
+                      _log(lc)
 
               t0, lastp = time.time(), 0
               while adb("shell", "getprop", "sys.boot_completed") != "1":
@@ -686,7 +735,8 @@ jobs:
   # ----------------------------------------------- 4. tu dong phat hanh (chi main)
   release:
     needs: [build-exe, exe-test, boot-test]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    # Luon dang phone.exe moi nhat (ke ca khi test do) de ban tai ve dung - ban test do se danh dau Pre-release
+    if: ${{ !cancelled() && needs.build-exe.result == 'success' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -699,9 +749,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Virtual Phone build ${{ github.run_number }}
+          name: Virtual Phone build ${{ github.run_number }}${{ (needs.exe-test.result != 'success' || needs.boot-test.result != 'success') && ' (test chua xanh)' || '' }}
+          prerelease: ${{ needs.exe-test.result != 'success' || needs.boot-test.result != 'success' }}
+          make_latest: ${{ needs.exe-test.result == 'success' && needs.boot-test.result == 'success' }}
           body: |
-            phone.exe - Android ao 12-15 (root + toi uu), da test tu dong.
-            Chay `phone.exe`: tu tai Java + SDK vao thu muc ban chon, lan dau hoi RAM/Disk/Core roi build, cac lan sau boot luon.
+            phone.exe - Android ao 12-15 (root hoac Play Store), tu tai Java + SDK vao thu muc ban chon.
+            Chay `phone.exe`: lan dau hoi RAM/Disk/Core roi build, cac lan sau boot luon. Log o <noi luu>\logs.
+
+            Ket qua test: exe-test = ${{ needs.exe-test.result }}, boot-test = ${{ needs.boot-test.result }}
           files: phone.exe
-          make_latest: true
