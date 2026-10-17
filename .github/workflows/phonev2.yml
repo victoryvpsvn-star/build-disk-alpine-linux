@@ -6,6 +6,7 @@ name: Virtual Phone - Auto Build, Test, Release
 #  - push len main      : them buoc tu dong dang phone.exe len GitHub Releases
 #  - moi thu Hai 02:00  : test lai de phat hien Google doi image/emulator
 #  - chay tay           : chi hoi noi luu (D:\phone / C:\phone) va ban Android
+#  - phone.exe --engine mumu : dieu khien MuMuPlayer (CI chi test thong bao loi, khong chay duoc MuMu tren runner)
 
 on:
   push:
@@ -54,12 +55,17 @@ jobs:
             Android 9 Go (--version 9go): Android 9 (API 28, x86 32-bit) cau hinh kieu may Go:
             RAM mac dinh 512 MB, man hinh 480x854, heap nho -> chay duoc tren may yeu.
 
+            Engine MuMuPlayer (--engine mumu): dieu khien MuMuPlayer 12 (MuMuManager.exe) de tao/boot may,
+            dat RAM/CPU/man hinh, tu cai APK. Muot hon emulator Google. Chua cai MuMu -> tu mo trang tai
+            (hoac --mumu-installer <file|url>) va tu tiep tuc khi cai xong.
+
           Build exe:
             pip install pyinstaller
             pyinstaller --onefile --name phone phone.py
           """
           import argparse
           import ctypes
+          import json
           import os
           import platform
           import re
@@ -315,6 +321,206 @@ jobs:
 
 
           # ----------------------------------------------------------------------------
+          # Engine MuMuPlayer: phone.exe dieu khien MuMuPlayer 12 qua MuMuManager.exe (can ban V4.0.0.3179 tro len)
+          MUMU_URL = "https://www.mumuplayer.com/download/"
+          MUMU_WAIT = 1200   # giay cho nguoi dung cai xong MuMuPlayer
+
+
+          def find_mumu(hint=None):
+              """Tim MuMuManager.exe / mumu-cli.exe (hint la thu muc cai hoac file exe)."""
+              bases = [hint or "", os.environ.get("MUMU_PATH", "")]
+              try:
+                  import winreg
+                  for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                      for sub in (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                                  r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"):
+                          try:
+                              k = winreg.OpenKey(root, sub)
+                          except OSError:
+                              continue
+                          for i in range(winreg.QueryInfoKey(k)[0]):
+                              try:
+                                  s = winreg.OpenKey(k, winreg.EnumKey(k, i))
+                                  nm = winreg.QueryValueEx(s, "DisplayName")[0]
+                                  if "mumu" in nm.lower():
+                                      for val in ("InstallLocation", "DisplayIcon"):
+                                          try:
+                                              v = str(winreg.QueryValueEx(s, val)[0]).strip('"').split(",")[0]
+                                              bases.append(v if os.path.isdir(v) else os.path.dirname(v))
+                                          except OSError:
+                                              pass
+                              except OSError:
+                                  continue
+              except Exception:
+                  pass
+              for dl in "CDEFG":
+                  for pf in ("Program Files", "Program Files (x86)", ""):
+                      for nm in ("MuMuPlayer-12.0", "MuMuPlayerGlobal-12.0", "MuMuPlayer"):
+                          bases.append(os.path.join(f"{dl}:\\", pf, "Netease", nm))
+              for b in bases:
+                  if not b:
+                      continue
+                  if os.path.isfile(b):
+                      return b
+                  for sd in ("", "shell", "nx_main"):
+                      for exe in ("MuMuManager.exe", "mumu-cli.exe"):
+                          q = os.path.join(b, sd, exe)
+                          if os.path.isfile(q):
+                              return q
+              return shutil.which("MuMuManager.exe") or shutil.which("mumu-cli.exe")
+
+
+          def ensure_mumu(a):
+              """Co MuMuPlayer -> dung luon. Chua co -> chay bo cai (file/URL do ban chi) hoac mo trang tai chinh thuc, roi tu cho cai xong."""
+              con = find_mumu(a.mumu_path)
+              if con:
+                  return con
+              inst = a.mumu_installer
+              if not inst and a.auto:
+                  raise SystemExit("Khong tim thay MuMuPlayer (MuMuManager.exe). Cai MuMuPlayer 12 tai " + MUMU_URL +
+                                   " hoac chi bo cai: --mumu-installer <file|url> ; da cai o cho khac: --mumu-path <thu muc>")
+              if inst:
+                  if inst.lower().startswith("http"):
+                      dest = os.path.join(os.environ.get("TEMP", "."), "mumu-setup.exe")
+                      say("Tai bo cai MuMuPlayer...")
+                      download(inst, dest)
+                      inst = dest
+                  if not os.path.isfile(inst):
+                      raise SystemExit(f"Khong thay bo cai MuMuPlayer: {inst}")
+                  say("Chay bo cai MuMuPlayer: lam theo cua so cai dat, xong phone.exe tu tiep tuc.", "yellow")
+                  subprocess.Popen([inst])
+              else:
+                  say(f"Chua co MuMuPlayer -> mo trang tai: {MUMU_URL}", "yellow")
+                  say("Tai ve, chay file cai dat (Next -> Install). Xong phone.exe tu tiep tuc (cho toi da 20 phut)...", "yellow")
+                  try:
+                      import webbrowser
+                      webbrowser.open(MUMU_URL)
+                  except Exception:
+                      pass
+              t0 = time.time()
+              while time.time() - t0 < MUMU_WAIT:
+                  con = find_mumu(a.mumu_path)
+                  if con:
+                      time.sleep(5)
+                      return con
+                  time.sleep(5)
+              raise SystemExit("Khong tim thay MuMuPlayer sau 20 phut. Cai xong roi chay lai, hoac chi duong dan: --mumu-path <thu muc>")
+
+
+          def parse_info(out):
+              """info tra JSON: 1 may -> {index:..}, nhieu may -> {'0': {...}, '1': {...}}. Tra ve {chi_so: dict}."""
+              try:
+                  d = json.loads(out[out.index("{"):out.rindex("}") + 1])
+              except Exception:
+                  return {}
+              if "index" in d:
+                  return {str(d["index"]): d}
+              return {str(k): v for k, v in d.items() if isinstance(v, dict)}
+
+
+          def run_mumu(a, path):
+              con = ensure_mumu(a)
+              say(f"MuMuPlayer: {con}", "green")
+
+              def mm(*args, timeout=120):
+                  try:
+                      r = subprocess.run([con, *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+                  except subprocess.TimeoutExpired:
+                      dbg(f"mumu {' '.join(args)} -> TIMEOUT {timeout}s")
+                      return ""
+                  out = ((r.stdout or "") + (r.stderr or "")).strip()
+                  dbg(f"mumu {' '.join(args)} -> {out[:200]!r}")
+                  return out
+
+              def info(i="all"):
+                  return parse_info(mm("info", "-v", str(i)))
+
+              def setk(idx, k, v, warn=True):
+                  mm("setting", "-v", str(idx), "-k", k, "-val", str(v))
+                  got = mm("setting", "-v", str(idx), "-k", k)
+                  if warn and str(v) not in got:
+                      say(f"CANH BAO: khong xac nhan duoc {k}={v} (MuMu tra ve: {got[:80]!r}). Chinh trong Cai dat MuMuPlayer neu can.", "yellow")
+
+              def apply(idx, ram=None, cores=None, size=False):
+                  if ram or cores:
+                      setk(idx, "performance_mode", "custom", warn=False)
+                  if cores:
+                      setk(idx, "performance_cpu.custom", max(1, min(16, cores)))
+                  if ram:
+                      setk(idx, "performance_mem.custom", f"{ram / 1024:.6f}")
+                  if size:
+                      setk(idx, "resolution_mode", "custom", warn=False)
+                      setk(idx, "resolution_width.custom", 720)
+                      setk(idx, "resolution_height.custom", 1280)
+                      setk(idx, "resolution_dpi.custom", 240)
+                  if not a.no_root:
+                      setk(idx, "root_permission", "true", warn=False)
+
+              idx_f = os.path.join(path, "mumu-index.txt")
+              idx = None
+              if os.path.exists(idx_f):
+                  s = open(idx_f, encoding="utf-8").read().strip()
+                  if s.isdigit() and s in info(s):
+                      idx = int(s)
+              if idx is not None:
+                  say(f"[REUSE] Da co may MuMu index {idx} -> bo qua tao, boot luon.", "green")
+                  if (a.ram or a.cores) and not info(idx).get(str(idx), {}).get("is_process_started"):
+                      say("Cap nhat cau hinh may ao...")
+                      apply(idx, a.ram, a.cores)
+              else:
+                  say("[BUILD] Chua co may MuMu cua phone.exe -> tao may moi.", "yellow")
+                  host_ram, host_cores = host_info()
+                  ram_def = max(2048, min(4096, round(host_ram * 0.35 / 256) * 256))
+                  ram = a.ram or int(ask("RAM cho may ao (MB)", ram_def, a.auto))
+                  cores = a.cores or int(ask("So core CPU", max(2, min(4, host_cores // 2)), a.auto))
+                  before = set(info("all"))
+                  mm("create")
+                  new = sorted(set(info("all")) - before, key=int)
+                  if not new:
+                      raise SystemExit("Tao may MuMu that bai (can MuMuPlayer 12 ban V4.0.0.3179 tro len; xem log).")
+                  idx = int(new[-1])
+                  with open(idx_f, "w", encoding="utf-8") as fh:
+                      fh.write(str(idx))
+                  apply(idx, ram, cores, size=True)
+                  say(f"Da tao xong may MuMu index {idx}. Config: RAM {ram}MB, Core {cores}, 720x1280", "green")
+
+              if a.no_boot:
+                  say(f"Xong (no-boot). Thu muc: {path}", "green")
+                  return
+
+              if not info(idx).get(str(idx), {}).get("is_process_started"):
+                  mm("control", "-v", str(idx), "launch")
+              say("Dang cho MuMuPlayer boot ...")
+              t0 = time.time()
+              while not info(idx).get(str(idx), {}).get("is_android_started"):
+                  if time.time() - t0 > 300:
+                      raise SystemExit("MuMuPlayer boot qua 5 phut. Mo MuMuPlayer bang tay xem loi (bat Virtualization/VT trong BIOS).")
+                  time.sleep(3)
+              say(f"MuMuPlayer da boot xong sau {int(time.time() - t0)}s.", "green")
+
+              # cai APK trong <path>\\apks (moi file chi cai 1 lan)
+              apk_dir = os.path.join(path, "apks")
+              os.makedirs(apk_dir, exist_ok=True)
+              done_f = os.path.join(apk_dir, ".installed")
+              done = set(open(done_f, encoding="utf-8").read().split("\n")) if os.path.exists(done_f) else set()
+              todo = [os.path.abspath(x) for x in (a.apk or [])]
+              todo += [os.path.join(apk_dir, x) for x in sorted(os.listdir(apk_dir)) if x.lower().endswith((".apk", ".xapk", ".apks"))]
+              for f in todo:
+                  if f in done:
+                      continue
+                  say(f"Cai {os.path.basename(f)} ...")
+                  out = mm("control", "-v", str(idx), "app", "install", "-apk", f, timeout=900)
+                  bad = re.search(r"fail|error|not found|invalid", out, re.I)
+                  say(out or "(khong co phan hoi)", "red" if bad else "green")
+                  if not bad:
+                      with open(done_f, "a", encoding="utf-8") as fh:
+                          fh.write(f + "\n")
+
+              say("San sang! Dang nhap Google roi cai Roblox (hoac dat file .apk vao thu muc apks).", "yellow")
+              say(f"Lan sau chay lai: phone.exe --engine mumu --path {path}  (boot luon, khong tao lai)")
+
+
+          # ----------------------------------------------------------------------------
           def main():
               global DEBUG
               ap = argparse.ArgumentParser(prog="phone")
@@ -332,6 +538,9 @@ jobs:
               ap.add_argument("--auto", action="store_true", help="khong hoi, dung mac dinh/tham so")
               ap.add_argument("--playstore", action="store_true", help="dung image co Google Play (cai Roblox...), khong root")
               ap.add_argument("--apk", action="append", help="file .apk tu cai sau khi boot (co the dung nhieu lan)")
+              ap.add_argument("--engine", choices=["mumu", "google"], help="mumu = dieu khien MuMuPlayer (muot, tu mo trang cai neu chua co) | google = emulator Google (mac dinh khi --auto)")
+              ap.add_argument("--mumu-path", help="thu muc cai MuMuPlayer (co MuMuManager.exe), vd C:\\Program Files\\Netease\\MuMuPlayer-12.0")
+              ap.add_argument("--mumu-installer", help="file hoac URL bo cai MuMuPlayer: phone.exe chay no roi tu cho cai xong")
               a = ap.parse_args()
               DEBUG = not a.quiet
 
@@ -348,6 +557,18 @@ jobs:
               logfile, logdir = open_log(path)
               say(f"DEBUG {'BAT' if DEBUG else 'TAT'} | log: {logfile}", "yellow")
               env_dump(path)
+              if a.engine:
+                  eng = a.engine
+              elif a.auto:
+                  eng = "google"
+              else:
+                  eng = ask("Engine: mumu = MuMuPlayer (muot hon, tu huong dan cai neu chua co) | google = emulator cua Google",
+                            "mumu", False).strip().lower()
+              if eng not in ("mumu", "google"):
+                  raise SystemExit(f"Engine khong hop le: {eng} (chon mumu hoac google)")
+              if eng == "mumu":
+                  run_mumu(a, path)
+                  return
               ver = a.version or ask("Chon Android (9go = Android 9 Go, 500 MB RAM, sieu nhe | 12 = nhe | 13 = can bang | 14, 15 = nang hon)", "13", a.auto)
               if ver not in API:
                   raise SystemExit(f"Version khong hop le: {ver} (chon 9go, 12, 13, 14 hoac 15)")
@@ -658,6 +879,15 @@ jobs:
         shell: pwsh
         run: ./dist/phone.exe --help
 
+      - name: Smoke test engine MuMu (runner khong co MuMuPlayer -> phai bao loi ro rang)
+        shell: pwsh
+        run: |
+          $out = & ./dist/phone.exe --engine mumu --mumu-path C:\nope --auto --path "$env:RUNNER_TEMP\mumutest" 2>&1 | Out-String
+          $rc = $LASTEXITCODE
+          Write-Host $out
+          if ($rc -eq 0) { Write-Host "Phai that bai khi khong co MuMuPlayer"; exit 1 }
+          if ($out -notmatch "Khong tim thay MuMuPlayer") { Write-Host "Thieu thong bao 'Khong tim thay MuMuPlayer'"; exit 1 }
+
       - uses: actions/upload-artifact@v4
         with:
           name: phone-exe
@@ -806,6 +1036,7 @@ jobs:
             phone.exe - Android ao 9 Go (500 MB RAM) + 12-15 (root hoac Play Store), tu tai Java + SDK vao thu muc ban chon.
             Chay `phone.exe`: lan dau hoi RAM/Disk/Core roi build, cac lan sau boot luon. Log o <noi luu>\logs.
             Android 9 Go: `phone.exe --version 9go` (RAM mac dinh 512 MB, man hinh 480x854).
+            Engine MuMuPlayer (muot hon, tu huong dan cai neu chua co): `phone.exe --engine mumu`.
 
             Ket qua test: exe-test = ${{ needs.exe-test.result }}, boot-test = ${{ needs.boot-test.result }}
           files: phone.exe
