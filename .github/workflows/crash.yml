@@ -127,7 +127,7 @@ jobs:
           loader_version=0.17.2
           fabric_version=0.141.6+1.21.11
           minecraft_range=~1.21
-          mod_version=2.3.0
+          mod_version=2.3.1
           maven_group=vn.venice.crashmod
           archives_base_name=crashmod
           EOF
@@ -846,12 +846,13 @@ jobs:
               /**
                * Doc thang trang thai phim tu GLFW -> mo GUI duoc o BAT KY dau:
                * title screen, menu, server list, trong world, dang mo chat, dang o inventory.
+               * 1.21.9+ : InputUtil.isKeyPressed nhan Window, khong nhan long handle nua.
                */
               private static void handleGuiKey(MinecraftClient client) {
                   InputUtil.Key bound = InputUtil.fromTranslationKey(openKey.getBoundKeyTranslationKey());
 
                   if (bound.getCategory() == InputUtil.Type.KEYSYM) {
-                      boolean down = InputUtil.isKeyPressed(client.getWindow().getHandle(), bound.getCode());
+                      boolean down = InputUtil.isKeyPressed(client.getWindow(), bound.getCode());
                       if (down && !keyHeld) ToggleScreen.toggle(client);
                       keyHeld = down;
                       while (openKey.wasPressed()) { }   // drain, tranh double-fire
@@ -895,7 +896,7 @@ jobs:
               private static Screen returnTo;
 
               private static String hint =
-                      "Bam 1 mode de doc ghi chu. Mode do (CAM) chi gui 1 packet/tick.";
+                      "Bam 1 mode de doc ghi chu. Mode chu XAM chi gui 1 packet/tick.";
 
               public ToggleScreen() { super(Text.literal("CrashMod v2")); }
 
@@ -1024,7 +1025,7 @@ jobs:
           # ======================= README ======================= #
           if [ ! -f README.md ]; then
           cat > README.md <<'EOF'
-          # CrashMod v2.3 — Minecraft 1.21.11
+          # CrashMod v2.3.1 — Minecraft 1.21.11
 
           Client-only. **Server KHONG can cai.** Chi can Fabric Loader + Fabric API o phia client.
 
@@ -1067,10 +1068,10 @@ jobs:
           | `resync` + **tui day sach 3MB** | 5 byte | serialize + deflate **ca inventory, moi tick** |
           | `fill_mix` | 0 | noi dung khong nen -> nghen duong truyen |
 
-          ## Mode xam = ONCE
+          ## Mode chu XAM = ONCE
 
           Cac mode hien chu **xam** chi gui **1 packet/tick** du rate bao nhieu, vi server
-          cung chi lam duoc 1 lan/tick. Rate khong anh huong chung. Dung rate cao cho chung la phi.
+          cung chi lam duoc 1 lan/tick. Rate khong anh huong chung.
 
           ---
 
