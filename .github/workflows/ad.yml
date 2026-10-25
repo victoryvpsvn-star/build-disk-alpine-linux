@@ -524,6 +524,8 @@ jobs:
       - name: Smoke test
         shell: python
         run: |
+          import os, sys
+          sys.path.insert(0, os.getcwd())
           import server as s
           assert len(s.POOL.keys) > 0, "không có key"
           try:
