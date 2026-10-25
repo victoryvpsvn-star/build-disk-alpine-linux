@@ -79,8 +79,8 @@ jobs:
                          "moonshotai/kimi-k3-agent", "glm-4.5-flash", "agnes-2.5-flash", "agnes-2.0-flash"],
               # 3 worker chạy song song khi việc khó
               "workers": ["qwen/qwen3.8-max:free", "qwen/qwen3.7-max:free", "mistralai/devstral-medium"],
-              "worker_steps": 20,
-              "max_steps": 30,
+              "worker_steps": 0,           # 0 = không giới hạn số bước; chỉ giới hạn thời gian mỗi tool (tool_timeout)
+              "max_steps": 0,              # 0 = không giới hạn số bước
               "temperature": 0,
               "allow_commands": True,
               "command_timeout": 180,      # tối đa 3 phút mỗi lệnh; quá giờ thì kill + bỏ qua + báo AI
@@ -246,6 +246,9 @@ jobs:
               if hit:
                   return hit, True
               res = api_request("/chat/completions", payload, prov=prov)
+              ch = res.get("choices") if isinstance(res, dict) else None
+              if not ch or not isinstance(ch[0], dict) or not ch[0].get("message"):
+                  raise RuntimeError("Phản hồi không hợp lệ từ " + model + ": " + str(res)[:200])
               u = res.get("usage") or {}
               cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens") or u.get("cached_tokens") or 0
               with STATS_LOCK:
@@ -467,6 +470,10 @@ jobs:
           SYSTEM = ("Bạn là kỹ sư phần mềm tự động. Làm việc HOÀN TOÀN trong workspace bằng tool, đường dẫn tương đối. "
                     "Quy trình: kế hoạch ngắn -> code -> chạy build/test -> sửa lỗi -> lặp tới khi chạy được. "
                     "Ưu tiên search_files hoặc read_file với start/end thay vì đọc cả file; edit_file cho sửa nhỏ; không đọc lại file không đổi. "
+                              "QUY TẮC CHẤT LƯỢNG: không bao giờ báo xong khi chưa CHẠY THỬ thật (build/test/chạy lệnh) và đọc kết quả; lỗi thì sửa rồi chạy lại, lặp tới khi chạy được. "
+                    "Không bịa kết quả hay tên hàm/thư viện: không chắc thì đọc file hoặc chạy lệnh để kiểm tra. "
+                    "Việc lớn thì chia bước nhỏ, xong bước nào kiểm tra bước đó. Một cách thất bại 2 lần thì ĐỔI cách khác, đừng lặp lại y hệt. "
+                    "Code phải hoàn chỉnh, không để TODO/placeholder, có xử lý lỗi cơ bản. Khi quên hoặc lịch sử bị nén, đọc neuro.md. "
                     "Trả lời ngắn gọn bằng ngôn ngữ của người dùng. Khi xong, tóm tắt 3-5 dòng.")
 
           SESSIONS = {}
@@ -600,11 +607,13 @@ jobs:
               def __init__(self, names):
                   self.names = names
                   self.msgs = []
+                  self.counts = {}
                   self.lock = threading.Lock()
 
               def post(self, frm, to, text):
                   with self.lock:
                       self.msgs.append({"from": frm, "to": to, "text": text})
+                      self.counts[frm] = self.counts.get(frm, 0) + 1
 
               def fetch(self, who, seen):
                   """Tin mới từ lần đọc trước, của người khác gửi cho mình hoặc cho tất cả."""
@@ -631,10 +640,21 @@ jobs:
                   return f"lỗi: 'to' phải là {', '.join(board.names)} hoặc all"
               if to == who:
                   return "lỗi: không nhắn cho chính mình"
+              if board.counts.get(who, 0) >= CFG.get("chat_limit", 8):
+                  return "Bạn đã dùng hết lượt chat. Chat không thay cho việc: hãy tập trung làm phần của mình."
               board.post(who, to, text)
               emit({"type": "chat", "who": who, "to": to, "text": text})
               neuro_log(sid, who, f"chat -> {to}: {clip(text, 200)}")
               return f"đã gửi cho {to}"
+
+
+          STOP = {}  # nid -> True khi người dùng bấm Dừng; mọi agent kiểm tra ở đầu mỗi bước
+
+
+          def chat_inbox(new):
+              return ("[CHAT từ worker khác]\n" + "\n".join(
+                  f"- {m['from']}{' (riêng cho bạn)' if m['to'] != 'ALL' else ''}: {m['text']}" for m in new) +
+                  "\n(Nếu họ hỏi hoặc cần thống nhất thì TRẢ LỜI bằng chat(to=người gửi) ngắn gọn, rồi tiếp tục phần việc của bạn. Đừng chỉ chat.)")
 
 
           def agent_loop(msgs, model, emit, who, max_steps, sid=None, board=None):
@@ -642,13 +662,16 @@ jobs:
               cache = {}
               last = ""
               seen = 0
-              for _ in range(max_steps):
+              last_key, streak = None, 0
+              for _ in (range(max_steps) if max_steps else iter(int, 1)):  # max_steps=0 -> lặp tới khi AI tự kết thúc
+                  if sid and STOP.get(sid):
+                      emit({"type": "text", "who": who, "text": "(đã dừng theo yêu cầu)"})
+                      return last
                   compact(msgs, cache)
                   if board:  # tin nhắn mới từ worker khác tự hiện vào hội thoại
                       new, seen = board.fetch(who, seen)
                       if new:
-                          msgs.append({"role": "user", "content": "[CHAT từ worker khác]\n" + "\n".join(
-                              f"- {m['from']}{' (riêng cho bạn)' if m['to'] != 'ALL' else ''}: {m['text']}" for m in new)})
+                          msgs.append({"role": "user", "content": chat_inbox(new)})
                   res, hit, used = call_with_fallback(msgs, model, TOOLS)
                   m = res["choices"][0]["message"]
                   tag = f"{who}·{short(used)}"
@@ -660,16 +683,31 @@ jobs:
                       last = m["content"]
                       emit({"type": "text", "who": tag, "text": m["content"], "cached": hit})
                   if not m.get("tool_calls"):
+                      if board:
+                          late, seen = board.fetch(who, seen)
+                          if late:
+                              msgs.append({"role": "user", "content": chat_inbox(late)})
+                              continue
                       if last:
                           neuro_log(sid, who, "kết quả: " + clip(last, 600))
                       return last
+                  stuck = False
                   for tc in m["tool_calls"]:
                       name = tc["function"]["name"]
+                      key = name + "|" + (tc["function"].get("arguments") or "")
+                      streak = streak + 1 if key == last_key else 1  # chỉ đếm khi gọi y hệt LIÊN TIẾP
+                      last_key = key
                       try:
                           args = json.loads(tc["function"].get("arguments") or "{}")
                           emit({"type": "tool", "who": who, "name": name,
                                 "args": clip(json.dumps(args, ensure_ascii=False), 400)})
-                          if name == "chat":
+                          if streak >= 6:
+                              stuck = True
+                              out = "[LẶP VÔ HẠN] Gọi y hệt 6 lần liền, hệ thống dừng bạn lại."
+                          elif streak >= 3:
+                              out = (f"[CẢNH BÁO LẶP] Bạn vừa gọi y hệt {streak} lần liền, không có tiến triển. "
+                                     "Đã bỏ qua lần gọi này. Hãy ĐỔI cách: đọc lỗi kỹ, đọc lại file liên quan, sửa nguyên nhân gốc hoặc thử hướng khác.")
+                          elif name == "chat":
                               out = do_chat(board, who, args, emit, sid)
                           elif name == "read_file":
                               out = run_limited(lambda: t_read_file(_cache=cache, **args), name)
@@ -683,6 +721,9 @@ jobs:
                       neuro_tool(sid, who, name, tc["function"].get("arguments"), out)
                       emit({"type": "result", "who": who, "text": clip(out, 600)})
                       msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": out})
+                  if stuck:
+                      emit({"type": "text", "who": who, "text": "(dừng: AI lặp lại y hệt một thao tác quá nhiều lần)"})
+                      return last
               emit({"type": "text", "who": who, "text": f"(dừng: đạt {max_steps} bước)"})
               return last
 
@@ -696,10 +737,18 @@ jobs:
           WORKER_SYS = ("Bạn là 1 trong các worker song song trong cùng workspace. Chỉ làm đúng phần được giao, "
                         "chỉ tạo/sửa file của phần mình, không đụng file của worker khác. Có thể chạy lệnh để test phần mình. "
                         "Các worker nhắn nhau được bằng tool chat(to, text), to = W1/W2/W3 hoặc all. "
-                        "Dùng khi phần của bạn có điểm chung với worker khác: báo tên file, hàm, endpoint API, định dạng dữ liệu, tên id/class; "
-                        "hoặc cần hỏi/nhờ việc. Làm ngay đầu việc nếu cần thống nhất giao diện chung, rồi mới code. "
-                        "Tin nhắn của người khác tự hiện ra dưới dạng [CHAT từ worker khác]: đọc và làm theo. Mỗi tin ngắn gọn, đừng spam. "
+                        "Quy tắc: (1) việc đầu tiên là chat(to=all) báo ngắn file/hàm/endpoint API/định dạng dữ liệu/tên id,class bạn sẽ tạo; "
+                        "(2) sau đó LÀM VIỆC của mình, chat không thay cho việc, tối đa 8 tin; "
+                        "(3) tin của người khác tự hiện ra dưới dạng [CHAT từ worker khác]: đọc, điều chỉnh code cho khớp, và nếu họ hỏi hay cần thống nhất thì trả lời lại bằng chat; "
+                        "(4) trước khi báo cáo xong, kiểm tra phần của mình đã khớp với những gì các worker khác đã báo. Mỗi tin ngắn gọn, đừng spam. "
+                                  "Trước khi báo cáo phải chạy thử phần của mình (nếu chạy được) và sửa tới khi ổn; không để TODO/placeholder. "
                         "Xong thì báo cáo ngắn (<=8 dòng): file đã tạo/sửa, cách chạy, vấn đề còn tồn đọng.")
+
+
+          REVIEW_SYS = ("Bạn là người kiểm tra độc lập (code review + QA), một cặp mắt thứ hai sau khi các worker và bước tích hợp đã xong. "
+                        "Việc: đọc yêu cầu, xem workspace (neuro.md ghi lại lịch sử), CHẠY build/test thật, tìm lỗi, phần còn thiếu, chỗ các phần không khớp nhau "
+                        "(tên hàm, endpoint, định dạng dữ liệu, đường dẫn file), rồi SỬA trực tiếp và chạy lại tới khi ổn. Không viết lại từ đầu, không đổi thứ đang chạy tốt. "
+                        "Báo cáo 3-5 dòng: đã sửa gì, còn tồn đọng gì.")
 
 
           def make_plan(text, force):
@@ -725,6 +774,7 @@ jobs:
               emit({"type": "text", "who": "Planner", "text": f"Việc khó -> chia {len(subs)} phần chạy song song:\n{titles}"})
               results = [None] * len(subs)
               names = [f"W{k + 1}" for k in range(len(subs))]
+              plan = "\n".join(f"{names[k]} - {x.get('title', '')}: {clip(str(x.get('goal', '')), 300)}" for k, x in enumerate(subs))
               board = Board(names)
 
               def others(i):
@@ -733,13 +783,25 @@ jobs:
               def work(i, x):
                   model = (workers or CFG["workers"])[i % len(workers or CFG["workers"])]
                   wm = [{"role": "system", "content": WORKER_SYS},
-                        {"role": "user", "content": f"Yêu cầu tổng: {text}\n\nKế hoạch chung:\n{titles}\n\n"
+                        {"role": "user", "content": f"Yêu cầu tổng: {text}\n\nKế hoạch chung (ai làm gì):\n{plan}\n\n"
                                                     f"Bạn là worker W{i + 1} (worker khác: {others(i)}). Nhiệm vụ: {x.get('title')}\n{x.get('goal')}\n\n"
-                                                    "Chỉ tạo/sửa file thuộc phần của bạn."}]
-                  try:
-                      results[i] = agent_loop(wm, model, emit, f"W{i + 1}", CFG["worker_steps"], sid=sid, board=board) or "(không có báo cáo)"
-                  except Exception as e:
-                      results[i] = f"LỖI: {e}"
+                                                    "Chỉ tạo/sửa file thuộc phần của bạn. Việc đầu tiên: chat(to=all) báo ngắn "
+                                                    "những gì bạn sẽ tạo, rồi LÀM VIỆC của mình (chat không thay cho việc)."}]
+                  me = f"W{i + 1}"
+                  for attempt in range(2):
+                      try:
+                          results[i] = agent_loop(wm, model, emit, me, CFG["worker_steps"], sid=sid, board=board) or "(không có báo cáo)"
+                          break
+                      except Exception as e:
+                          err = f"{type(e).__name__}: {e}"
+                          neuro_log(sid, me, "lỗi: " + clip(err, 200))
+                          if attempt == 0:
+                              model = next((m for m in CFG["models"] if m != model), model)
+                              emit({"type": "text", "who": me, "text": f"({me} gặp lỗi: {err}) -> tự chạy lại bằng {short(model)}"})
+                          else:
+                              results[i] = f"LỖI: {err}"
+                              emit({"type": "text", "who": me, "text": f"({me} dừng vì lỗi: {err})"})
+                              board.post(me, "ALL", f"(tự động) {me} đã dừng vì lỗi, worker nào xong sớm thì đỡ phần của {me}")
 
               ths = [threading.Thread(target=work, args=(i, x), daemon=True) for i, x in enumerate(subs)]
               for t in ths:
@@ -751,11 +813,16 @@ jobs:
                            "[HỆ THỐNG] Các worker đã xong. Báo cáo:\n" + report + board.digest() +
                            "\n\nHãy kiểm tra workspace, ghép nối các phần, chạy build/test, sửa lỗi, rồi tóm tắt."})
               agent_loop(msgs, CFG["models"][0], emit, "Tích hợp", CFG["max_steps"], sid=sid)
+              if CFG.get("review", True) and not (sid and STOP.get(sid)):
+                  rm = [{"role": "system", "content": REVIEW_SYS + (neuro_note(sid) if sid else "")},
+                        {"role": "user", "content": f"Yêu cầu của người dùng:\n{text}\n\nHãy kiểm tra, chạy thử và sửa lỗi."}]
+                  agent_loop(rm, CFG["models"][1] if len(CFG["models"]) > 1 else CFG["models"][0], emit, "Kiểm tra", CFG["max_steps"], sid=sid)
 
 
           def run_agent(sid, text, mode, emit, workers=None):
               workers = [w for w in (workers or []) if w in CFG["models"]] or None
               nid = neuro_id(sid)
+              STOP.pop(nid, None)
               neuro_log(nid, "Người dùng", "Yêu cầu: " + clip(text, 800))
               msgs = SESSIONS.setdefault(sid, [{"role": "system", "content": SYSTEM + neuro_note(nid)}])
               msgs.append({"role": "user", "content": text})
@@ -809,6 +876,9 @@ jobs:
               def do_POST(self):
                   n = int(self.headers.get("Content-Length") or 0)
                   body = json.loads(self.rfile.read(n) or b"{}")
+                  if self.path == "/api/stop":
+                      STOP[neuro_id(body.get("sid", ""))] = True
+                      return self._json({"ok": True})
                   if self.path == "/api/reset":
                       SESSIONS.pop(body.get("sid", ""), None)
                       return self._json({"ok": True})
@@ -1077,7 +1147,7 @@ jobs:
             if(role==='W2')return 'var(--c-w2)';
             if(role==='W3')return 'var(--c-w3)';
             if(role==='Planner')return 'var(--c-plan)';
-            if(role==='Tích hợp')return 'var(--c-int)';
+            if(role==='Tích hợp'||role==='Kiểm tra')return 'var(--c-int)';
             return 'var(--c-main)';
           }
           function keepScroll(){var nearEnd=stream.scrollHeight-stream.scrollTop-stream.clientHeight<160;if(nearEnd)stream.scrollTop=stream.scrollHeight}
@@ -1200,7 +1270,7 @@ jobs:
             }
             keepScroll();
           }
-          function setBusy(b){runBtn.hidden=b;stopBtn.hidden=!b;q.disabled=b;if(!b)q.focus()}
+          function setBusy(b){runBtn.hidden=b;stopBtn.hidden=!b;stopBtn.textContent='Dừng';q.disabled=b;if(!b)q.focus()}
 
           function doSend(text,workers){
             text=(text||'').trim();if(!text||ctrl)return;
@@ -1252,7 +1322,11 @@ jobs:
             doSend(text,null);
           }
           $('#composer').onsubmit=function(e){e.preventDefault();send(q.value)};
-          stopBtn.onclick=function(){if(ctrl)ctrl.abort()};
+          stopBtn.onclick=function(){
+            fetch('/api/stop',{method:'POST',body:JSON.stringify({sid:sid})});
+            stopBtn.textContent='Đang dừng…';
+            setTimeout(function(){if(ctrl)ctrl.abort();stopBtn.textContent='Dừng'},8000);
+          };
           q.addEventListener('keydown',function(e){
             if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send(q.value)}
           });
@@ -1280,7 +1354,7 @@ jobs:
           cat > config.json <<'XAGENT_EOF_C'
           {
             "base_url": "https://api.xkiro.com/v1",
-            "max_steps": 30,
+            "max_steps": 0,
             "temperature": 0,
             "allow_commands": true
           }
