@@ -83,7 +83,8 @@ jobs:
               "max_steps": 30,
               "temperature": 0,
               "allow_commands": True,
-              "command_timeout": 90,
+              "command_timeout": 180,      # tối đa 3 phút mỗi lệnh; quá giờ thì kill + bỏ qua + báo AI
+              "tool_timeout": 180,         # tối đa 3 phút mỗi lần gọi tool (chốt chặn chung)
               "max_tool_output": 4000,     # cắt output tool để tiết kiệm token
               "max_read": 8000,            # tối đa ký tự mỗi lần read_file (đọc tiếp bằng start/end)
               "compact_chars": 20000,      # lịch sử vượt ngưỡng này thì nén phần cũ (1 lần/đợt để giữ cache API)
@@ -377,6 +378,43 @@ jobs:
                                r"curl|wget|Invoke-WebRequest|Invoke-Expression|iex|powershell\s+-e|mklink|takeown|icacls)\b", re.I)
 
 
+          def timeout_msg(what, secs):
+              return (f"[HẾT THỜI GIAN] {what} chạy quá {secs} giây nên hệ thống đã dừng và BỎ QUA nó. "
+                      "Đừng chạy lại y hệt. Nếu là server/vòng lặp vô hạn hoặc chờ nhập liệu thì đừng chạy trực tiếp; "
+                      "hãy kiểm tra bằng cách khác (đọc code, chạy lệnh ngắn tự kết thúc) rồi làm bước tiếp theo.")
+
+
+          def kill_tree(p):
+              """Giết cả cây tiến trình (shell=True trên Windows chỉ kill cmd.exe, python con vẫn chạy và giữ pipe)."""
+              try:
+                  if os.name == "nt":
+                      subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True, timeout=10)
+                  else:
+                      p.kill()
+              except Exception:
+                  pass
+
+
+          def run_limited(fn, name):
+              """Chốt chặn chung: tool nào quá tool_timeout thì bỏ qua và báo lại cho AI."""
+              box = {}
+
+              def go():
+                  try:
+                      box["v"] = fn()
+                  except BaseException as e:
+                      box["e"] = e
+
+              t = threading.Thread(target=go, daemon=True)
+              t.start()
+              t.join(CFG["tool_timeout"])
+              if t.is_alive():
+                  return timeout_msg(f"tool {name}", CFG["tool_timeout"])
+              if "e" in box:
+                  raise box["e"]
+              return box["v"]
+
+
           def t_run_command(command):
               if not CFG["allow_commands"]:
                   raise Denied("run_command đang tắt trong config.json")
@@ -391,12 +429,19 @@ jobs:
                       safe(tok)  # đường dẫn tuyệt đối/.. phải nằm trong workspace
               env = {k: v for k, v in os.environ.items() if k.upper() in ("PATH", "SYSTEMROOT", "COMSPEC", "PATHEXT", "LANG")}
               env.update({"TEMP": WS, "TMP": WS, "HOME": WS, "USERPROFILE": WS})
+              tmo = CFG["command_timeout"]
+              p = subprocess.Popen(command, shell=True, cwd=WS, env=env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
               try:
-                  r = subprocess.run(command, shell=True, cwd=WS, env=env, capture_output=True,
-                                     text=True, timeout=CFG["command_timeout"], errors="replace")
-                  return clip_tail(f"exit={r.returncode}\n{r.stdout}\n{r.stderr}")
+                  o, e = p.communicate(timeout=tmo)
+                  return clip_tail(f"exit={p.returncode}\n{o}\n{e}")
               except subprocess.TimeoutExpired:
-                  return f"timeout sau {CFG['command_timeout']}s"
+                  kill_tree(p)
+                  try:
+                      o, e = p.communicate(timeout=5)
+                  except Exception:
+                      o = e = ""
+                  return timeout_msg(f"lệnh `{clip(command, 100)}`", tmo) + "\n" + clip_tail(f"{o}\n{e}", 300, 700)
 
 
           FUNCS = {"list_files": t_list_files, "read_file": t_read_file, "write_file": t_write_file,
@@ -417,6 +462,7 @@ jobs:
               _tool("edit_file", "Thay đúng 1 đoạn text trong file", ["path", "old", "new"], ["path", "old", "new"]),
               _tool("delete_file", "Xoá file/thư mục", ["path"], ["path"]),
               _tool("run_command", "Chạy lệnh shell (cwd = workspace) để build/test", ["command"], ["command"]),
+              _tool("chat", "Nhắn cho worker khác khi chạy song song (to = W1/W2/W3 hoặc all) để phối hợp", ["to", "text"], ["to", "text"]),
           ]
           SYSTEM = ("Bạn là kỹ sư phần mềm tự động. Làm việc HOÀN TOÀN trong workspace bằng tool, đường dẫn tương đối. "
                     "Quy trình: kế hoạch ngắn -> code -> chạy build/test -> sửa lỗi -> lặp tới khi chạy được. "
@@ -548,12 +594,61 @@ jobs:
                       STATS["saved_chars"] += saved
 
 
-          def agent_loop(msgs, model, emit, who, max_steps, sid=None):
+          class Board:
+              """Bảng tin chung của các worker chạy song song: nhắn riêng (to=W2) hoặc cho tất cả (to=ALL)."""
+
+              def __init__(self, names):
+                  self.names = names
+                  self.msgs = []
+                  self.lock = threading.Lock()
+
+              def post(self, frm, to, text):
+                  with self.lock:
+                      self.msgs.append({"from": frm, "to": to, "text": text})
+
+              def fetch(self, who, seen):
+                  """Tin mới từ lần đọc trước, của người khác gửi cho mình hoặc cho tất cả."""
+                  with self.lock:
+                      items = [m for m in self.msgs[seen:] if m["from"] != who and m["to"] in (who, "ALL")]
+                      return items, len(self.msgs)
+
+              def digest(self):
+                  with self.lock:
+                      if not self.msgs:
+                          return ""
+                      return "\n\nTrao đổi giữa các worker:\n" + clip("\n".join(
+                          f"{m['from']} -> {m['to']}: {m['text']}" for m in self.msgs), 2000)
+
+
+          def do_chat(board, who, args, emit, sid):
+              if board is None:
+                  return "Không có worker nào khác trong lượt này, không cần chat."
+              to = str(args.get("to", "all")).strip().upper() or "ALL"
+              text = str(args.get("text", "")).strip()
+              if not text:
+                  return "lỗi: thiếu nội dung"
+              if to != "ALL" and to not in board.names:
+                  return f"lỗi: 'to' phải là {', '.join(board.names)} hoặc all"
+              if to == who:
+                  return "lỗi: không nhắn cho chính mình"
+              board.post(who, to, text)
+              emit({"type": "chat", "who": who, "to": to, "text": text})
+              neuro_log(sid, who, f"chat -> {to}: {clip(text, 200)}")
+              return f"đã gửi cho {to}"
+
+
+          def agent_loop(msgs, model, emit, who, max_steps, sid=None, board=None):
               """Vòng lặp agent: gọi model -> chạy tool -> lặp. Trả về câu trả lời cuối."""
               cache = {}
               last = ""
+              seen = 0
               for _ in range(max_steps):
                   compact(msgs, cache)
+                  if board:  # tin nhắn mới từ worker khác tự hiện vào hội thoại
+                      new, seen = board.fetch(who, seen)
+                      if new:
+                          msgs.append({"role": "user", "content": "[CHAT từ worker khác]\n" + "\n".join(
+                              f"- {m['from']}{' (riêng cho bạn)' if m['to'] != 'ALL' else ''}: {m['text']}" for m in new)})
                   res, hit, used = call_with_fallback(msgs, model, TOOLS)
                   m = res["choices"][0]["message"]
                   tag = f"{who}·{short(used)}"
@@ -574,10 +669,12 @@ jobs:
                           args = json.loads(tc["function"].get("arguments") or "{}")
                           emit({"type": "tool", "who": who, "name": name,
                                 "args": clip(json.dumps(args, ensure_ascii=False), 400)})
-                          if name == "read_file":
-                              out = t_read_file(_cache=cache, **args)
+                          if name == "chat":
+                              out = do_chat(board, who, args, emit, sid)
+                          elif name == "read_file":
+                              out = run_limited(lambda: t_read_file(_cache=cache, **args), name)
                           else:
-                              out = FUNCS[name](**args)
+                              out = run_limited(lambda: FUNCS[name](**args), name)
                       except Denied as e:
                           out = str(e)
                       except Exception as e:
@@ -598,6 +695,10 @@ jobs:
                       "việc ghép nối để lại cho bước tích hợp.")
           WORKER_SYS = ("Bạn là 1 trong các worker song song trong cùng workspace. Chỉ làm đúng phần được giao, "
                         "chỉ tạo/sửa file của phần mình, không đụng file của worker khác. Có thể chạy lệnh để test phần mình. "
+                        "Các worker nhắn nhau được bằng tool chat(to, text), to = W1/W2/W3 hoặc all. "
+                        "Dùng khi phần của bạn có điểm chung với worker khác: báo tên file, hàm, endpoint API, định dạng dữ liệu, tên id/class; "
+                        "hoặc cần hỏi/nhờ việc. Làm ngay đầu việc nếu cần thống nhất giao diện chung, rồi mới code. "
+                        "Tin nhắn của người khác tự hiện ra dưới dạng [CHAT từ worker khác]: đọc và làm theo. Mỗi tin ngắn gọn, đừng spam. "
                         "Xong thì báo cáo ngắn (<=8 dòng): file đã tạo/sửa, cách chạy, vấn đề còn tồn đọng.")
 
 
@@ -623,15 +724,20 @@ jobs:
               titles = "\n".join(f"{i + 1}. {x.get('title', '')}" for i, x in enumerate(subs))
               emit({"type": "text", "who": "Planner", "text": f"Việc khó -> chia {len(subs)} phần chạy song song:\n{titles}"})
               results = [None] * len(subs)
+              names = [f"W{k + 1}" for k in range(len(subs))]
+              board = Board(names)
+
+              def others(i):
+                  return ", ".join(n for n in names if n != names[i])
 
               def work(i, x):
                   model = (workers or CFG["workers"])[i % len(workers or CFG["workers"])]
                   wm = [{"role": "system", "content": WORKER_SYS},
                         {"role": "user", "content": f"Yêu cầu tổng: {text}\n\nKế hoạch chung:\n{titles}\n\n"
-                                                    f"Bạn là worker #{i + 1}. Nhiệm vụ: {x.get('title')}\n{x.get('goal')}\n\n"
+                                                    f"Bạn là worker W{i + 1} (worker khác: {others(i)}). Nhiệm vụ: {x.get('title')}\n{x.get('goal')}\n\n"
                                                     "Chỉ tạo/sửa file thuộc phần của bạn."}]
                   try:
-                      results[i] = agent_loop(wm, model, emit, f"W{i + 1}", CFG["worker_steps"], sid=sid) or "(không có báo cáo)"
+                      results[i] = agent_loop(wm, model, emit, f"W{i + 1}", CFG["worker_steps"], sid=sid, board=board) or "(không có báo cáo)"
                   except Exception as e:
                       results[i] = f"LỖI: {e}"
 
@@ -642,7 +748,7 @@ jobs:
                   t.join()
               report = "\n\n".join(f"### Phần {i + 1}: {x.get('title')}\n{results[i]}" for i, x in enumerate(subs))
               msgs.append({"role": "user", "content":
-                           "[HỆ THỐNG] Các worker đã xong. Báo cáo:\n" + report +
+                           "[HỆ THỐNG] Các worker đã xong. Báo cáo:\n" + report + board.digest() +
                            "\n\nHãy kiểm tra workspace, ghép nối các phần, chạy build/test, sửa lỗi, rồi tóm tắt."})
               agent_loop(msgs, CFG["models"][0], emit, "Tích hợp", CFG["max_steps"], sid=sid)
 
@@ -1084,6 +1190,9 @@ jobs:
             }else if(o.type==='result'){
               var d2=ctx.tools[role];
               if(d2){d2.classList.remove('run');$('pre',d2).textContent=o.text}
+            }else if(o.type==='chat'){
+              var t3=targetFor(role),c3=el('div','msg');c3.style.setProperty('--c',colorOf(role));
+              c3.innerHTML='<div class="who"><b>💬 '+esc(role)+' → '+esc(o.to)+'</b></div>'+md(o.text);t3.box.appendChild(c3);
             }else if(o.type==='error'){
               finishLanes();ctx.flow.appendChild(el('div','note','<b>Lỗi:</b> '+esc(o.text)));
             }else if(o.type==='done'){
