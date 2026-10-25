@@ -60,7 +60,13 @@ jobs:
           # ---------- cấu hình ----------
           CFG = {
               "base_url": "https://api.xkiro.com/v1",
-              "model": "moonshotai/kimi-k3-agent",
+              # Danh sách model, thứ tự ưu tiên. Model đầu = planner + tích hợp. Lỗi thì tự chuyển model kế tiếp.
+              "models": ["qwen/qwen3.8-max:free", "qwen/qwen3.7-max:free", "qwen/qwen3-coder-plus:free",
+                         "mistralai/devstral-medium", "mistralai/codestral-2508", "qwen/qwen3.6-plus:free",
+                         "moonshotai/kimi-k3-agent"],
+              # 3 worker chạy song song khi việc khó
+              "workers": ["qwen/qwen3.8-max:free", "qwen/qwen3.7-max:free", "mistralai/devstral-medium"],
+              "worker_steps": 20,
               "max_steps": 30,
               "temperature": 0,
               "allow_commands": True,
@@ -109,6 +115,7 @@ jobs:
                           d = self.dead.get(k)
                           if d is None or (d[0] is not None and d[0] < now):
                               self.dead.pop(k, None)
+                              self.i += 1  # xoay vòng để 3 worker dùng key khác nhau
                               return k
                           self.i += 1
                       return None
@@ -177,9 +184,10 @@ jobs:
                   json.dump(v, f, ensure_ascii=False)
 
 
-          def chat_call(messages):
-              payload = {"model": CFG["model"], "messages": messages, "tools": TOOLS,
-                         "temperature": CFG["temperature"]}
+          def chat_call(messages, model, tools=None):
+              payload = {"model": model, "messages": messages, "temperature": CFG["temperature"]}
+              if tools:
+                  payload["tools"] = tools
               h = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
               hit = cache_get(h) if CFG["temperature"] == 0 else None
               with STATS_LOCK:
@@ -220,9 +228,6 @@ jobs:
               return s if len(s) <= n else s[: n // 2] + f"\n…[cắt {len(s) - n} ký tự]…\n" + s[-n // 2:]
 
 
-          READ_CACHE = {}
-
-
           def t_list_files(path="."):
               base = safe(path)
               out = []
@@ -235,15 +240,16 @@ jobs:
               return "\n".join(sorted(out)) or "(trống)"
 
 
-          def t_read_file(path):
+          def t_read_file(path, _cache=None):
               f = safe(path)
               st = os.stat(f)
               sig = (st.st_mtime, st.st_size)
-              if READ_CACHE.get(f) == sig:
+              c = _cache if _cache is not None else {}
+              if c.get(f) == sig:
                   return "[file không đổi từ lần đọc trước, xem lại nội dung ở trên]"
               with open(f, encoding="utf-8", errors="replace") as fh:
                   data = fh.read()
-              READ_CACHE[f] = sig
+              c[f] = sig
               return clip(data, 12000)
 
 
@@ -252,7 +258,6 @@ jobs:
               os.makedirs(os.path.dirname(f), exist_ok=True)
               with open(f, "w", encoding="utf-8", newline="\n") as fh:
                   fh.write(content)
-              READ_CACHE.pop(f, None)
               return f"đã ghi {path} ({len(content)} ký tự)"
 
 
@@ -264,7 +269,6 @@ jobs:
                   return f"lỗi: 'old' xuất hiện {s.count(old)} lần (cần đúng 1)"
               with open(f, "w", encoding="utf-8", newline="\n") as fh:
                   fh.write(s.replace(old, new))
-              READ_CACHE.pop(f, None)
               return "đã sửa " + path
 
 
@@ -332,46 +336,144 @@ jobs:
           SESSIONS = {}
 
 
-          def compact(msgs):
+          def short(m):
+              return m.split("/")[-1].replace(":free", "")
+
+
+          def call_with_fallback(messages, prefer, tools=None):
+              """Thử model ưu tiên, lỗi thì lần lượt các model còn lại."""
+              order = [prefer] + [m for m in CFG["models"] if m != prefer]
+              last = None
+              for m in order:
+                  try:
+                      res, hit = chat_call(messages, m, tools)
+                      return res, hit, m
+                  except RuntimeError as e:
+                      last = e
+                      if "Tất cả key" in str(e) or "Chưa có key" in str(e):
+                          break
+              raise last
+
+
+          def compact(msgs, cache):
               """Nén output tool cũ khi lịch sử quá dài (giữ 8 message cuối)."""
               if sum(len(str(m.get("content") or "")) for m in msgs) < CFG["compact_chars"]:
                   return
               for m in msgs[1:-8]:
                   if m["role"] == "tool" and len(m["content"]) > 300:
                       m["content"] = m["content"][:200] + "\n…[đã nén]"
-              READ_CACHE.clear()
+              cache.clear()
 
 
-          def run_agent(sid, user_text, emit):
-              msgs = SESSIONS.setdefault(sid, [{"role": "system", "content": SYSTEM}])
-              msgs.append({"role": "user", "content": user_text})
-              for step in range(CFG["max_steps"]):
-                  compact(msgs)
-                  res, hit = chat_call(msgs)
+          def agent_loop(msgs, model, emit, who, max_steps):
+              """Vòng lặp agent: gọi model -> chạy tool -> lặp. Trả về câu trả lời cuối."""
+              cache = {}
+              last = ""
+              for _ in range(max_steps):
+                  compact(msgs, cache)
+                  res, hit, used = call_with_fallback(msgs, model, TOOLS)
                   m = res["choices"][0]["message"]
+                  tag = f"{who}·{short(used)}"
                   entry = {"role": "assistant", "content": m.get("content") or ""}
                   if m.get("tool_calls"):
                       entry["tool_calls"] = m["tool_calls"]
                   msgs.append(entry)
                   if m.get("content"):
-                      emit({"type": "text", "text": m["content"], "cached": hit})
+                      last = m["content"]
+                      emit({"type": "text", "who": tag, "text": m["content"], "cached": hit})
                   if not m.get("tool_calls"):
-                      break
+                      return last
                   for tc in m["tool_calls"]:
                       name = tc["function"]["name"]
                       try:
                           args = json.loads(tc["function"].get("arguments") or "{}")
-                          emit({"type": "tool", "name": name, "args": clip(json.dumps(args, ensure_ascii=False), 400)})
-                          out = FUNCS[name](**args)
+                          emit({"type": "tool", "who": who, "name": name,
+                                "args": clip(json.dumps(args, ensure_ascii=False), 400)})
+                          if name == "read_file":
+                              out = t_read_file(_cache=cache, **args)
+                          else:
+                              out = FUNCS[name](**args)
                       except Denied as e:
                           out = str(e)
                       except Exception as e:
                           out = f"lỗi: {type(e).__name__}: {e}"
                       out = clip(str(out))
-                      emit({"type": "result", "text": clip(out, 600)})
+                      emit({"type": "result", "who": who, "text": clip(out, 600)})
                       msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": out})
+              emit({"type": "text", "who": who, "text": f"(dừng: đạt {max_steps} bước)"})
+              return last
+
+
+          PLAN_SYS = ("Bạn là kiến trúc sư phần mềm. Đánh giá yêu cầu và CHỈ trả về JSON, không giải thích. "
+                      'Việc nhỏ/đơn giản: {"hard": false}. '
+                      'Việc khó (nhiều module/file có thể làm độc lập): {"hard": true, "subtasks": '
+                      '[{"title": "...", "goal": "mô tả chi tiết, nêu rõ file sẽ tạo/sửa"}]}. '
+                      "Tối đa 3 subtask; mỗi subtask làm tập file KHÁC NHAU, không chồng chéo; "
+                      "việc ghép nối để lại cho bước tích hợp.")
+          WORKER_SYS = ("Bạn là 1 trong các worker song song trong cùng workspace. Chỉ làm đúng phần được giao, "
+                        "chỉ tạo/sửa file của phần mình, không đụng file của worker khác. Có thể chạy lệnh để test phần mình. "
+                        "Xong thì báo cáo ngắn (<=8 dòng): file đã tạo/sửa, cách chạy, vấn đề còn tồn đọng.")
+
+
+          def make_plan(text, force):
+              user = f"Yêu cầu:\n{text}\n\nFile hiện có trong workspace:\n{clip(t_list_files(), 1500)}"
+              if force:
+                  user += "\n\nBẮT BUỘC chia thành 2-3 subtask."
+              res, _, _ = call_with_fallback([{"role": "system", "content": PLAN_SYS},
+                                              {"role": "user", "content": user}], CFG["models"][0])
+              txt = res["choices"][0]["message"].get("content") or ""
+              mm = re.search(r"\{.*\}", txt, re.S)
+              if not mm:
+                  return None
+              try:
+                  d = json.loads(mm.group(0))
+              except ValueError:
+                  return None
+              subs = [x for x in (d.get("subtasks") or []) if isinstance(x, dict)]
+              return subs[:3] if d.get("hard") and len(subs) >= 2 else None
+
+
+          def run_swarm(text, subs, msgs, emit):
+              titles = "\n".join(f"{i + 1}. {x.get('title', '')}" for i, x in enumerate(subs))
+              emit({"type": "text", "who": "Planner", "text": f"Việc khó -> chia {len(subs)} phần chạy song song:\n{titles}"})
+              results = [None] * len(subs)
+
+              def work(i, x):
+                  model = CFG["workers"][i % len(CFG["workers"])]
+                  wm = [{"role": "system", "content": WORKER_SYS},
+                        {"role": "user", "content": f"Yêu cầu tổng: {text}\n\nKế hoạch chung:\n{titles}\n\n"
+                                                    f"Bạn là worker #{i + 1}. Nhiệm vụ: {x.get('title')}\n{x.get('goal')}\n\n"
+                                                    "Chỉ tạo/sửa file thuộc phần của bạn."}]
+                  try:
+                      results[i] = agent_loop(wm, model, emit, f"W{i + 1}", CFG["worker_steps"]) or "(không có báo cáo)"
+                  except Exception as e:
+                      results[i] = f"LỖI: {e}"
+
+              ths = [threading.Thread(target=work, args=(i, x), daemon=True) for i, x in enumerate(subs)]
+              for t in ths:
+                  t.start()
+              for t in ths:
+                  t.join()
+              report = "\n\n".join(f"### Phần {i + 1}: {x.get('title')}\n{results[i]}" for i, x in enumerate(subs))
+              msgs.append({"role": "user", "content":
+                           "[HỆ THỐNG] Các worker đã xong. Báo cáo:\n" + report +
+                           "\n\nHãy kiểm tra workspace, ghép nối các phần, chạy build/test, sửa lỗi, rồi tóm tắt."})
+              agent_loop(msgs, CFG["models"][0], emit, "Tích hợp", CFG["max_steps"])
+
+
+          def run_agent(sid, text, mode, emit):
+              msgs = SESSIONS.setdefault(sid, [{"role": "system", "content": SYSTEM}])
+              msgs.append({"role": "user", "content": text})
+              subs = None
+              if mode in ("auto", "swarm"):
+                  try:
+                      subs = make_plan(text, mode == "swarm")
+                  except Exception as e:
+                      emit({"type": "text", "who": "Planner", "text": f"(bỏ qua chia việc: {e})"})
+              if subs:
+                  run_swarm(text, subs, msgs, emit)
               else:
-                  emit({"type": "text", "text": f"(dừng: đạt {CFG['max_steps']} bước)"})
+                  agent_loop(msgs, CFG["models"][0], emit, "Main", CFG["max_steps"])
               emit({"type": "done", "stats": STATS})
 
 
@@ -403,7 +505,7 @@ jobs:
                       except Exception as e:
                           self._json({"error": str(e)}, 502)
                   elif self.path == "/api/stats":
-                      self._json({"stats": STATS, "keys": POOL.status(), "model": CFG["model"], "workspace": WS})
+                      self._json({"stats": STATS, "keys": POOL.status(), "model": CFG["models"], "workspace": WS})
                   elif self.path == "/api/files":
                       self._json({"files": t_list_files()})
                   else:
@@ -422,11 +524,14 @@ jobs:
                   self.send_header("Cache-Control", "no-cache")
                   self.end_headers()
 
+                  wl = threading.Lock()
+
                   def emit(o):
-                      self.wfile.write((json.dumps(o, ensure_ascii=False) + "\n").encode())
-                      self.wfile.flush()
+                      with wl:
+                          self.wfile.write((json.dumps(o, ensure_ascii=False) + "\n").encode())
+                          self.wfile.flush()
                   try:
-                      run_agent(body.get("sid") or uuid.uuid4().hex, body.get("message", ""), emit)
+                      run_agent(body.get("sid") or uuid.uuid4().hex, body.get("message", ""), body.get("mode", "auto"), emit)
                   except Exception as e:
                       try:
                           emit({"type": "error", "text": str(e)})
@@ -436,7 +541,7 @@ jobs:
 
           if __name__ == "__main__":
               srv = ThreadingHTTPServer((CFG["host"], CFG["port"]), H)
-              print(f"XAgent: http://{CFG['host']}:{CFG['port']}  | workspace: {WS} | keys: {len(POOL.keys)} | model: {CFG['model']}")
+              print(f"XAgent: http://{CFG['host']}:{CFG['port']}  | workspace: {WS} | keys: {len(POOL.keys)} | model: {CFG['models'][0]}")
               try:
                   srv.serve_forever()
               except KeyboardInterrupt:
@@ -444,68 +549,414 @@ jobs:
           XAGENT_EOF_S
           cat > index.html <<'XAGENT_EOF_I'
           <!doctype html>
-          <html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <html lang="vi">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
           <title>XAgent</title>
           <style>
-          :root{--bg:#fff;--fg:#1a1a1a;--mut:#6b7280;--card:#f3f4f6;--acc:#2563eb;--bd:#e5e7eb}
-          @media(prefers-color-scheme:dark){:root{--bg:#111318;--fg:#e5e7eb;--mut:#9ca3af;--card:#1b1e26;--acc:#60a5fa;--bd:#2a2e38}}
-          *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif;display:flex;height:100vh}
-          aside{width:300px;border-right:1px solid var(--bd);padding:12px;overflow:auto}
+          :root{
+            --bg:#f4f5f8;--panel:#ffffff;--ink:#1b2233;--mut:#667085;--line:#e1e5ec;--soft:#eef1fa;
+            --accent:#2f5bea;--accent-ink:#ffffff;--danger:#c0362c;--ok:#1a8f5c;
+            --c-plan:#0e7c86;--c-w1:#2f5bea;--c-w2:#b4690e;--c-w3:#8a3fe0;--c-int:#1a8f5c;--c-main:#4b5565;
+            --code-bg:#f0f2f7;--shadow:0 1px 2px rgba(20,30,60,.06),0 8px 24px -12px rgba(20,30,60,.18);
+            --mono:"Cascadia Code","JetBrains Mono",Consolas,"SF Mono",Menlo,monospace;
+            --sans:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+          }
+          @media (prefers-color-scheme:dark){
+            :root:not([data-theme="light"]){
+              --bg:#0d1220;--panel:#141a2b;--ink:#e5e9f4;--mut:#8f9bb5;--line:#232b42;--soft:#1a2340;
+              --accent:#7b9bff;--accent-ink:#0d1220;--danger:#ff7b6e;--ok:#4cd39a;
+              --c-plan:#3ccad6;--c-w1:#7b9bff;--c-w2:#f0b25c;--c-w3:#c39bff;--c-int:#4cd39a;--c-main:#a7b1c6;
+              --code-bg:#0f1526;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -12px rgba(0,0,0,.6);
+            }
+          }
+          :root[data-theme="dark"]{
+            --bg:#0d1220;--panel:#141a2b;--ink:#e5e9f4;--mut:#8f9bb5;--line:#232b42;--soft:#1a2340;
+            --accent:#7b9bff;--accent-ink:#0d1220;--danger:#ff7b6e;--ok:#4cd39a;
+            --c-plan:#3ccad6;--c-w1:#7b9bff;--c-w2:#f0b25c;--c-w3:#c39bff;--c-int:#4cd39a;--c-main:#a7b1c6;
+            --code-bg:#0f1526;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -12px rgba(0,0,0,.6);
+          }
+          *{box-sizing:border-box}
+          html,body{height:100%}
+          body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 var(--sans);-webkit-font-smoothing:antialiased}
+          button,input,textarea,select{font:inherit;color:inherit}
+          button{cursor:pointer}
+          :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+          [hidden]{display:none!important}
+
+          .app{height:100%;display:flex;flex-direction:column}
+          .top{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+          .brand{font-weight:650;font-size:16px;letter-spacing:-.01em;display:flex;align-items:baseline;gap:10px;min-width:0}
+          .brand small{font-weight:400;color:var(--mut);font:12px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34vw}
+          .chips{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
+          .chip{padding:2px 10px;border-radius:999px;background:var(--soft);color:var(--mut);font-size:12px;white-space:nowrap}
+          .chip b{color:var(--ink);font-weight:600;margin-right:3px}
+          .dots{display:flex;gap:4px;padding-left:4px}
+          .dots i{width:9px;height:9px;border-radius:50%;background:var(--ok)}
+          .dots i.bad{background:var(--danger)}.dots i.wait{background:#d9a21b}
+          .icon{border:1px solid var(--line);background:var(--panel);border-radius:8px;width:34px;height:34px;display:grid;place-items:center}
+          #menu{display:none}
+
+          .body{flex:1;display:flex;min-height:0}
+          aside{width:300px;flex:none;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+          .tabs{display:flex;gap:2px;padding:8px 8px 0;border-bottom:1px solid var(--line)}
+          .tabs button{border:0;background:none;padding:8px 12px;color:var(--mut);border-bottom:2px solid transparent;margin-bottom:-1px}
+          .tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+          .tabpane{padding:12px;overflow:auto;flex:1}
+          .tabpane h4{margin:14px 0 6px;font-size:13px;font-weight:600}
+          .tabpane h4:first-child{margin-top:0}
+          .row{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12.5px}
+          .row .id{font-family:var(--mono);font-size:12px;word-break:break-all;flex:1}
+          .row .meta{color:var(--mut);font-size:11.5px;text-align:right}
+          .badge{background:var(--soft);color:var(--accent);border-radius:6px;padding:0 6px;font-size:11px;font-weight:600}
+          .btn{border:1px solid var(--line);background:var(--panel);border-radius:9px;padding:6px 12px}
+          .btn:hover{background:var(--soft)}
+          .field{width:100%;border:1px solid var(--line);background:var(--bg);border-radius:9px;padding:7px 10px;margin:8px 0}
+          .empty{color:var(--mut);padding:8px 0}
+          .mono{font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-all}
+
           main{flex:1;display:flex;flex-direction:column;min-width:0}
-          #log{flex:1;overflow:auto;padding:16px}
-          .m{margin:8px 0;padding:10px 12px;border-radius:8px;background:var(--card);white-space:pre-wrap;word-break:break-word}
-          .u{background:var(--acc);color:#fff}.t{font:12px ui-monospace,monospace;color:var(--mut)}.e{color:#dc2626}
-          form{display:flex;gap:8px;padding:12px;border-top:1px solid var(--bd)}
-          textarea{flex:1;resize:none;height:56px;padding:8px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--fg);font:inherit}
-          button{padding:8px 14px;border:0;border-radius:8px;background:var(--acc);color:#fff;cursor:pointer}
-          button.g{background:var(--card);color:var(--fg);border:1px solid var(--bd);width:100%;margin-bottom:8px}
-          h4{margin:14px 0 6px}pre{white-space:pre-wrap;font-size:12px;color:var(--mut);margin:0}
-          table{width:100%;font-size:12px;border-collapse:collapse}td,th{border-bottom:1px solid var(--bd);padding:3px;text-align:left}
-          @media(max-width:700px){aside{display:none}}
-          </style></head><body>
-          <aside>
-            <button class="g" onclick="models()">Models &amp; giá</button>
-            <button class="g" onclick="stats()">Key &amp; token cache</button>
-            <button class="g" onclick="files()">File trong workspace</button>
-            <button class="g" onclick="reset()">Phiên mới</button>
-            <div id="side"></div>
-          </aside>
-          <main>
-            <div id="log"></div>
-            <form onsubmit="send(event)"><textarea id="q" placeholder="Mô tả thứ cần build… (Enter gửi, Shift+Enter xuống dòng)"></textarea><button id="b">Chạy</button></form>
-          </main>
+          #stream{flex:1;overflow:auto;padding:20px 20px 8px;scroll-behavior:smooth}
+          .inner{max-width:1040px;margin:0 auto}
+          .hello{max-width:560px;margin:9vh auto 0}
+          .hello h1{font-size:26px;line-height:1.2;margin:0 0 8px;letter-spacing:-.02em}
+          .hello p{color:var(--mut);margin:0 0 18px;max-width:46ch}
+          .starts{display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+          .starts button{border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:9px 14px;text-align:left}
+          .starts button:hover{border-color:var(--accent)}
+
+          .turn{margin-bottom:26px}
+          .user{margin-left:auto;max-width:78%;width:fit-content;background:var(--accent);color:var(--accent-ink);padding:9px 14px;border-radius:16px 16px 4px 16px;white-space:pre-wrap;word-break:break-word}
+          .flow{margin-top:14px;display:flex;flex-direction:column;gap:12px}
+          .msg{--c:var(--c-main);border-left:3px solid var(--c);padding:1px 0 1px 12px}
+          .who{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);margin-bottom:2px}
+          .who b{color:var(--c);font-weight:650}
+          .who .cache{background:var(--soft);border-radius:6px;padding:0 6px}
+          .p{white-space:pre-wrap;word-break:break-word}
+          .p+.code,.code+.p,.code+.code{margin-top:8px}
+          .p code{font-family:var(--mono);font-size:12.5px;background:var(--code-bg);padding:1px 5px;border-radius:5px}
+          .code{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--code-bg)}
+          .codehead{display:flex;justify-content:space-between;align-items:center;padding:3px 10px;font-size:11.5px;color:var(--mut);border-bottom:1px solid var(--line)}
+          .codehead button{border:0;background:none;color:var(--accent);padding:2px 4px}
+          .code pre{margin:0;padding:10px 12px;overflow:auto;font:12.5px/1.5 var(--mono);max-height:420px}
+
+          details.tool{--c:var(--c-main);margin:6px 0 0;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12.5px}
+          details.tool summary{cursor:pointer;padding:5px 10px;list-style:none;display:flex;gap:8px;align-items:baseline;min-width:0}
+          details.tool summary::-webkit-details-marker{display:none}
+          details.tool summary::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--c);flex:none;align-self:center}
+          details.tool.run summary::before{animation:pulse 1s ease-in-out infinite}
+          details.tool .tn{font-weight:600;flex:none}
+          details.tool .ta{font-family:var(--mono);font-size:11.5px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+          details.tool pre{margin:0;padding:8px 10px;border-top:1px solid var(--line);font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
+
+          .lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px}
+          .lane{--c:var(--c-w1);border:1px solid var(--line);border-top:3px solid var(--c);border-radius:12px;background:var(--panel);box-shadow:var(--shadow);display:flex;flex-direction:column;min-width:0;max-height:560px}
+          .lane .lh{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line)}
+          .lane .lh b{color:var(--c)}
+          .lane .lh .m{color:var(--mut);font-size:12px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+          .lane .lh .st{margin-left:auto;font-size:12px;color:var(--mut);display:flex;gap:6px;align-items:center;white-space:nowrap}
+          .lane .lh .st::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--c);animation:pulse 1s ease-in-out infinite}
+          .lane.done .lh .st::before{animation:none;background:var(--ok)}
+          .lane .lb{padding:10px 12px;overflow:auto;display:flex;flex-direction:column;gap:10px}
+          .lane .msg{border-left-width:0;padding:0}
+          .note{border:1px solid var(--danger);color:var(--danger);border-radius:10px;padding:8px 12px}
+
+          form{padding:10px 16px 14px}
+          .composer{max-width:1040px;margin:0 auto;background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:8px 10px}
+          .composer:focus-within{border-color:var(--accent)}
+          textarea{width:100%;border:0;outline:0;resize:none;background:none;padding:6px 6px 2px;max-height:200px;min-height:28px}
+          .bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+          .seg{display:inline-flex;background:var(--bg);border-radius:10px;padding:2px;border:1px solid var(--line)}
+          .seg input{position:absolute;opacity:0;pointer-events:none}
+          .seg label{padding:4px 11px;border-radius:8px;color:var(--mut);cursor:pointer;font-size:13px}
+          .seg input:checked+label{background:var(--panel);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(20,30,60,.15)}
+          .seg input:focus-visible+label{outline:2px solid var(--accent)}
+          .sp{flex:1}
+          #run,#stop{border:0;border-radius:10px;padding:7px 18px;font-weight:600}
+          #run{background:var(--accent);color:var(--accent-ink)}
+          #stop{background:var(--danger);color:#fff}
+
+          @keyframes pulse{50%{opacity:.25}}
+          @media (prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important}}
+          @media (max-width:860px){
+            #menu{display:grid}
+            aside{position:fixed;z-index:20;left:0;top:0;bottom:0;transform:translateX(-102%);transition:transform .18s;box-shadow:var(--shadow)}
+            aside.open{transform:none}
+            .chips .opt{display:none}
+            .brand small{display:none}
+            .user{max-width:92%}
+          }
+          </style>
+          </head>
+          <body>
+          <div class="app">
+            <div class="top">
+              <button class="icon" id="menu" aria-label="Mở bảng bên">☰</button>
+              <div class="brand">XAgent <small id="ws"></small></div>
+              <div class="chips" id="chips"></div>
+              <div class="dots" id="dots" title="Trạng thái key"></div>
+              <button class="icon" id="theme" aria-label="Đổi giao diện sáng/tối">◐</button>
+            </div>
+            <div class="body">
+              <aside id="panel">
+                <div class="tabs" role="tablist">
+                  <button role="tab" aria-selected="true" data-tab="models">Model</button>
+                  <button role="tab" aria-selected="false" data-tab="keys">Key</button>
+                  <button role="tab" aria-selected="false" data-tab="files">File</button>
+                </div>
+                <div class="tabpane" id="pane-models">
+                  <h4>Thứ tự ưu tiên</h4>
+                  <div id="order"></div>
+                  <h4>Model trên api.xkiro.com</h4>
+                  <button class="btn" id="loadModels" type="button">Tải danh sách &amp; giá</button>
+                  <input class="field" id="filter" placeholder="Lọc model…" hidden>
+                  <div id="modelList"></div>
+                </div>
+                <div class="tabpane" id="pane-keys" hidden><div id="keyList"></div></div>
+                <div class="tabpane" id="pane-files" hidden>
+                  <button class="btn" id="loadFiles" type="button">Làm mới</button>
+                  <div class="mono" id="fileList" style="margin-top:10px"></div>
+                </div>
+              </aside>
+              <main>
+                <div id="stream"><div class="inner" id="inner">
+                  <div class="hello" id="hello">
+                    <h1>Giao việc, XAgent tự build trong workspace.</h1>
+                    <p>Việc khó sẽ được chia cho 3 model làm song song, rồi ghép lại và chạy thử. Mọi thao tác chỉ nằm trong thư mục workspace.</p>
+                    <div class="starts">
+                      <button type="button">Viết web todo bằng HTML/JS, có lưu và lọc việc</button>
+                      <button type="button">Tạo REST API Python (Flask) có đăng nhập, kèm test</button>
+                      <button type="button">Đọc workspace và sửa các lỗi build đang có</button>
+                    </div>
+                  </div>
+                </div></div>
+                <form id="composer" autocomplete="off">
+                  <div class="composer">
+                    <textarea id="q" rows="1" placeholder="Mô tả việc cần build…  (Enter để gửi, Shift+Enter xuống dòng)"></textarea>
+                    <div class="bar">
+                      <div class="seg" role="radiogroup" aria-label="Chế độ chạy">
+                        <input type="radio" name="mode" id="m1" value="auto" checked><label for="m1">Tự động</label>
+                        <input type="radio" name="mode" id="m2" value="swarm"><label for="m2">3 model song song</label>
+                        <input type="radio" name="mode" id="m3" value="single"><label for="m3">1 model</label>
+                      </div>
+                      <button class="btn" type="button" id="new">Phiên mới</button>
+                      <span class="sp"></span>
+                      <button id="run" type="submit">Chạy</button>
+                      <button id="stop" type="button" hidden>Dừng</button>
+                    </div>
+                  </div>
+                </form>
+              </main>
+            </div>
+          </div>
+
           <script>
-          let sid=crypto.randomUUID();const log=document.getElementById('log'),q=document.getElementById('q'),side=document.getElementById('side');
-          q.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send(e)}});
-          function add(c,t){const d=document.createElement('div');d.className='m '+c;d.textContent=t;log.appendChild(d);log.scrollTop=log.scrollHeight}
-          async function send(e){e.preventDefault();const m=q.value.trim();if(!m)return;q.value='';add('u',m);document.getElementById('b').disabled=true;
-           try{const r=await fetch('/api/chat',{method:'POST',body:JSON.stringify({sid,message:m})});
-           const rd=r.body.getReader(),dc=new TextDecoder();let buf='';
-           while(true){const{done,value}=await rd.read();if(done)break;buf+=dc.decode(value,{stream:true});let i;
-            while((i=buf.indexOf('\n'))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);if(!l)continue;const o=JSON.parse(l);
-             if(o.type==='text')add('',(o.cached?'[cache] ':'')+o.text);
-             else if(o.type==='tool')add('t','▶ '+o.name+' '+o.args);
-             else if(o.type==='result')add('t',o.text);
-             else if(o.type==='error')add('e','Lỗi: '+o.text);
-             else if(o.type==='done')stats(true)}}}
-           catch(x){add('e',String(x))}document.getElementById('b').disabled=false}
-          async function models(){side.innerHTML='Đang tải…';const r=await(await fetch('/api/models')).json();
-           if(r.error){side.innerHTML='<div class=e>'+r.error+'</div>';return}
-           const list=r.data||r.models||r;const rows=list.map(m=>{const p=m.pricing||{};const price=Object.keys(p).length?JSON.stringify(p):
-            ['input_price','output_price','prompt_price','completion_price','price'].filter(k=>m[k]!=null).map(k=>k+': '+m[k]).join(', ');
-            return '<tr><td>'+(m.id||m.name)+'</td><td>'+(price||'—')+'</td></tr>'}).join('');
-           side.innerHTML='<h4>'+list.length+' model</h4><table><tr><th>ID</th><th>Giá</th></tr>'+rows+'</table>'}
-          async function stats(quiet){const r=await(await fetch('/api/stats')).json();const s=r.stats;
-           side.innerHTML='<h4>Model</h4><pre>'+r.model+'</pre><h4>Token</h4><pre>request: '+s.requests+'\ncache local: '+s.cache_hits+'\nprompt: '+s.prompt+' (cached '+s.cached_prompt+')\ncompletion: '+s.completion+'</pre><h4>Keys</h4><pre>'+r.keys.map(k=>k.key+'  '+k.state).join('\n')+'</pre>'}
-          async function files(){const r=await(await fetch('/api/files')).json();side.innerHTML='<h4>workspace</h4><pre>'+r.files+'</pre>'}
-          async function reset(){await fetch('/api/reset',{method:'POST',body:JSON.stringify({sid})});sid=crypto.randomUUID();log.innerHTML=''}
-          stats();
-          </script></body></html>
+          (function(){
+          var $=function(s,r){return (r||document).querySelector(s)};
+          var stream=$('#stream'),inner=$('#inner'),q=$('#q'),runBtn=$('#run'),stopBtn=$('#stop');
+          var sid=(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random());
+          var ctrl=null,order=[];
+
+          function el(tag,cls,html){var e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e}
+          function esc(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
+          function fmt(n){n=n||0;return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n)}
+          function md(src){
+            var parts=String(src).split('```'),out='';
+            parts.forEach(function(p,i){
+              if(i%2){
+                var nl=p.indexOf('\n'),lang=nl>=0?p.slice(0,nl).trim():'',code=nl>=0?p.slice(nl+1):p;
+                out+='<div class="code"><div class="codehead"><span>'+esc(lang||'code')+'</span><button type="button" class="copy">Sao chép</button></div><pre>'+esc(code.replace(/\n$/,''))+'</pre></div>';
+              }else if(p.trim()){
+                out+='<div class="p">'+esc(p.trim()).replace(/`([^`\n]+)`/g,'<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>')+'</div>';
+              }
+            });
+            return out;
+          }
+          function colorOf(role){
+            if(role==='W1')return 'var(--c-w1)';
+            if(role==='W2')return 'var(--c-w2)';
+            if(role==='W3')return 'var(--c-w3)';
+            if(role==='Planner')return 'var(--c-plan)';
+            if(role==='Tích hợp')return 'var(--c-int)';
+            return 'var(--c-main)';
+          }
+          function keepScroll(){var nearEnd=stream.scrollHeight-stream.scrollTop-stream.clientHeight<160;if(nearEnd)stream.scrollTop=stream.scrollHeight}
+
+          /* theme */
+          (function(){
+            var t=null;try{t=localStorage.getItem('xa-theme')}catch(e){}
+            if(t)document.documentElement.setAttribute('data-theme',t);
+            $('#theme').onclick=function(){
+              var cur=document.documentElement.getAttribute('data-theme');
+              if(!cur)cur=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
+              var nx=cur==='dark'?'light':'dark';
+              document.documentElement.setAttribute('data-theme',nx);
+              try{localStorage.setItem('xa-theme',nx)}catch(e){}
+            };
+          })();
+
+          /* side panel */
+          var panel=$('#panel');
+          $('#menu').onclick=function(){panel.classList.toggle('open')};
+          document.querySelectorAll('.tabs button').forEach(function(b){
+            b.onclick=function(){
+              document.querySelectorAll('.tabs button').forEach(function(x){x.setAttribute('aria-selected',x===b?'true':'false')});
+              ['models','keys','files'].forEach(function(n){$('#pane-'+n).hidden=(n!==b.dataset.tab)});
+              if(b.dataset.tab==='files')loadFiles();
+            };
+          });
+          function loadFiles(){
+            fetch('/api/files').then(function(r){return r.json()}).then(function(r){$('#fileList').textContent=r.files||'(trống)'});
+          }
+          $('#loadFiles').onclick=loadFiles;
+          var allModels=[];
+          $('#loadModels').onclick=function(){
+            var box=$('#modelList');box.innerHTML='<div class="empty">Đang tải…</div>';
+            fetch('/api/models').then(function(r){return r.json()}).then(function(r){
+              if(r.error){box.innerHTML='<div class="note">'+esc(r.error)+'</div>';return}
+              allModels=r.data||r.models||(Array.isArray(r)?r:[]);
+              $('#filter').hidden=false;renderModels('');
+            }).catch(function(e){box.innerHTML='<div class="note">'+esc(e)+'</div>'});
+          };
+          $('#filter').oninput=function(e){renderModels(e.target.value)};
+          function priceOf(m){
+            var p=m.pricing;
+            if(p&&typeof p==='object'){var k=Object.keys(p);if(k.length)return k.map(function(x){return x+': '+p[x]}).join(', ')}
+            var ks=['input_price','output_price','prompt_price','completion_price','price'];
+            return ks.filter(function(k){return m[k]!=null}).map(function(k){return k+': '+m[k]}).join(', ');
+          }
+          function renderModels(f){
+            f=(f||'').toLowerCase();
+            var list=allModels.filter(function(m){return String(m.id||m.name).toLowerCase().indexOf(f)>=0});
+            $('#modelList').innerHTML='<div class="empty">'+list.length+'/'+allModels.length+' model</div>'+list.map(function(m){
+              var id=m.id||m.name,pos=order.indexOf(id),pr=priceOf(m);
+              return '<div class="row"><span class="id">'+esc(id)+'</span>'+(pos>=0?'<span class="badge" title="Thứ tự ưu tiên">#'+(pos+1)+'</span>':'')+'<span class="meta">'+esc(pr||'')+'</span></div>';
+            }).join('');
+          }
+
+          /* stats */
+          function refresh(){
+            return fetch('/api/stats').then(function(r){return r.json()}).then(function(r){
+              var s=r.stats;order=Array.isArray(r.model)?r.model:[r.model];
+              $('#ws').textContent=r.workspace;$('#ws').title=r.workspace;
+              $('#chips').innerHTML=
+                '<span class="chip"><b>'+s.requests+'</b>request</span>'+
+                '<span class="chip"><b>'+s.cache_hits+'</b>trúng cache</span>'+
+                '<span class="chip opt"><b>'+fmt(s.prompt)+'</b>vào'+(s.cached_prompt?' ('+fmt(s.cached_prompt)+' cached)':'')+'</span>'+
+                '<span class="chip opt"><b>'+fmt(s.completion)+'</b>ra</span>';
+              $('#dots').innerHTML=r.keys.map(function(k){return '<i class="'+(k.state==='ok'?'':(k.state.indexOf('tạm')===0?'wait':'bad'))+'" title="'+esc(k.key+' – '+k.state)+'"></i>'}).join('');
+              $('#keyList').innerHTML=(r.keys.length?r.keys.map(function(k){return '<div class="row"><span class="id">'+esc(k.key)+'</span><span class="meta">'+esc(k.state)+'</span></div>'}).join(''):'<div class="empty">Chưa có key.</div>');
+              $('#order').innerHTML=order.map(function(m,i){return '<div class="row"><span class="badge">#'+(i+1)+'</span><span class="id">'+esc(m)+'</span></div>'}).join('');
+            }).catch(function(){});
+          }
+
+          /* agent stream */
+          var ctx=null;
+          function addMsg(target,role,model,text,cached){
+            var m=el('div','msg');m.style.setProperty('--c',colorOf(role));
+            var inLane=!!target.closest('.lane');
+            m.innerHTML=(inLane?'':'<div class="who"><b>'+esc(role)+'</b>'+(model?'<span>'+esc(model)+'</span>':'')+(cached?'<span class="cache">cache</span>':'')+'</div>')+md(text);
+            target.appendChild(m);return m;
+          }
+          function laneFor(n){
+            if(!ctx.lanes){ctx.lanes=el('div','lanes');ctx.flow.appendChild(ctx.lanes);ctx.laneEls={}}
+            if(!ctx.laneEls[n]){
+              var role='W'+n,l=el('div','lane');l.style.setProperty('--c',colorOf(role));
+              l.innerHTML='<div class="lh"><b>'+role+'</b><span class="m"></span><span class="st">đang chạy</span></div><div class="lb"></div>';
+              ctx.lanes.appendChild(l);ctx.laneEls[n]=l;
+            }
+            return ctx.laneEls[n];
+          }
+          function finishLanes(){
+            if(!ctx||!ctx.laneEls)return;
+            Object.keys(ctx.laneEls).forEach(function(k){var l=ctx.laneEls[k];if(!l.classList.contains('done')){l.classList.add('done');$('.st',l).textContent='xong'}});
+          }
+          function targetFor(role){
+            var m=/^W(\d)$/.exec(role);
+            if(m){var l=laneFor(m[1]);return {box:$('.lb',l),lane:l}}
+            finishLanes();return {box:ctx.flow,lane:null};
+          }
+          function handle(o){
+            var parts=String(o.who||'Main').split('·'),role=parts[0],model=parts[1]||'';
+            if(o.type==='text'){
+              var t=targetFor(role);
+              if(t.lane&&model)$('.m',t.lane).textContent=model;
+              addMsg(t.box,role,model,o.text,o.cached);
+            }else if(o.type==='tool'){
+              var t2=targetFor(role),d=el('details','tool run');d.style.setProperty('--c',colorOf(role));
+              d.innerHTML='<summary><span class="tn">'+esc(o.name)+'</span><span class="ta">'+esc(o.args)+'</span></summary><pre>Đang chạy…</pre>';
+              t2.box.appendChild(d);ctx.tools[role]=d;
+            }else if(o.type==='result'){
+              var d2=ctx.tools[role];
+              if(d2){d2.classList.remove('run');$('pre',d2).textContent=o.text}
+            }else if(o.type==='error'){
+              finishLanes();ctx.flow.appendChild(el('div','note','<b>Lỗi:</b> '+esc(o.text)));
+            }else if(o.type==='done'){
+              finishLanes();
+            }
+            keepScroll();
+          }
+          function setBusy(b){runBtn.hidden=b;stopBtn.hidden=!b;q.disabled=b;if(!b)q.focus()}
+
+          function send(text){
+            text=(text||'').trim();if(!text||ctrl)return;
+            var hello=$('#hello');if(hello)hello.remove();
+            var turn=el('div','turn');turn.appendChild(el('div','user',esc(text)));
+            var flow=el('div','flow');turn.appendChild(flow);inner.appendChild(turn);
+            ctx={flow:flow,lanes:null,laneEls:null,tools:{}};
+            stream.scrollTop=stream.scrollHeight;
+            q.value='';autosize();setBusy(true);
+            ctrl=new AbortController();
+            var mode=$('input[name=mode]:checked').value;
+            fetch('/api/chat',{method:'POST',signal:ctrl.signal,body:JSON.stringify({sid:sid,message:text,mode:mode})}).then(function(r){
+              var rd=r.body.getReader(),dc=new TextDecoder(),buf='';
+              function pump(){
+                return rd.read().then(function(x){
+                  if(x.done)return;
+                  buf+=dc.decode(x.value,{stream:true});var i;
+                  while((i=buf.indexOf('\n'))>=0){
+                    var line=buf.slice(0,i);buf=buf.slice(i+1);
+                    if(line){try{handle(JSON.parse(line))}catch(e){}}
+                  }
+                  return pump();
+                });
+              }
+              return pump();
+            }).catch(function(e){
+              if(e&&e.name==='AbortError')flow.appendChild(el('div','note','Đã dừng xem kết quả. Server có thể còn chạy nốt bước hiện tại.'));
+              else flow.appendChild(el('div','note','<b>Mất kết nối:</b> '+esc(e)));
+            }).then(function(){finishLanes();ctrl=null;setBusy(false);refresh()});
+          }
+          $('#composer').onsubmit=function(e){e.preventDefault();send(q.value)};
+          stopBtn.onclick=function(){if(ctrl)ctrl.abort()};
+          q.addEventListener('keydown',function(e){
+            if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send(q.value)}
+          });
+          function autosize(){q.style.height='auto';q.style.height=Math.min(q.scrollHeight,200)+'px'}
+          q.addEventListener('input',autosize);
+          document.querySelectorAll('.starts button').forEach(function(b){b.onclick=function(){q.value=b.textContent;autosize();q.focus()}});
+          $('#new').onclick=function(){
+            if(ctrl)return;
+            fetch('/api/reset',{method:'POST',body:JSON.stringify({sid:sid})}).then(function(){location.reload()});
+          };
+          document.addEventListener('click',function(e){
+            var b=e.target.closest&&e.target.closest('.copy');
+            if(!b)return;
+            var pre=b.closest('.code').querySelector('pre');
+            navigator.clipboard.writeText(pre.textContent).then(function(){b.textContent='Đã chép';setTimeout(function(){b.textContent='Sao chép'},1200)});
+          });
+          document.addEventListener('click',function(e){if(panel.classList.contains('open')&&!panel.contains(e.target)&&e.target.id!=='menu')panel.classList.remove('open')});
+
+          refresh();
+          })();
+          </script>
+          </body>
+          </html>
           XAGENT_EOF_I
           cat > config.json <<'XAGENT_EOF_C'
           {
             "base_url": "https://api.xkiro.com/v1",
-            "model": "moonshotai/kimi-k3-agent",
             "max_steps": 30,
             "temperature": 0,
             "allow_commands": true
