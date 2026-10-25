@@ -71,8 +71,10 @@ jobs:
               "temperature": 0,
               "allow_commands": True,
               "command_timeout": 90,
-              "max_tool_output": 6000,     # cắt output tool để tiết kiệm token
-              "compact_chars": 60000,      # vượt ngưỡng này thì nén lịch sử cũ
+              "max_tool_output": 4000,     # cắt output tool để tiết kiệm token
+              "max_read": 8000,            # tối đa ký tự mỗi lần read_file (đọc tiếp bằng start/end)
+              "compact_chars": 20000,      # lịch sử vượt ngưỡng này thì nén phần cũ (1 lần/đợt để giữ cache API)
+              "plan_min_chars": 160,       # chế độ Tự động: yêu cầu ngắn hơn thì bỏ bước planner
               "host": "127.0.0.1",
               "port": 3000,
           }
@@ -136,7 +138,7 @@ jobs:
 
 
           POOL = KeyPool(load_keys())
-          STATS = {"requests": 0, "cache_hits": 0, "prompt": 0, "completion": 0, "cached_prompt": 0}
+          STATS = {"requests": 0, "cache_hits": 0, "prompt": 0, "completion": 0, "cached_prompt": 0, "saved_chars": 0}
           STATS_LOCK = threading.Lock()
 
 
@@ -249,17 +251,58 @@ jobs:
               return "\n".join(sorted(out)) or "(trống)"
 
 
-          def t_read_file(path, _cache=None):
+          def clip_tail(s, head=800, tail=2200):
+              """Output lệnh: lỗi thường nằm cuối nên giữ nhiều phần đuôi."""
+              return s if len(s) <= head + tail + 80 else s[:head] + f"\n…[cắt {len(s) - head - tail} ký tự]…\n" + s[-tail:]
+
+
+          def t_read_file(path, start=None, end=None, _cache=None):
               f = safe(path)
               st = os.stat(f)
-              sig = (st.st_mtime, st.st_size)
+              s0 = int(start) if start else None
+              e0 = int(end) if end else None
+              sig = (st.st_mtime, st.st_size, s0, e0)
               c = _cache if _cache is not None else {}
-              if c.get(f) == sig:
+              if c.get((f, s0, e0)) == sig:
                   return "[file không đổi từ lần đọc trước, xem lại nội dung ở trên]"
               with open(f, encoding="utf-8", errors="replace") as fh:
-                  data = fh.read()
-              c[f] = sig
-              return clip(data, 12000)
+                  lines = fh.read().splitlines()
+              c[(f, s0, e0)] = sig
+              lo = (s0 or 1) - 1
+              hi = e0 or len(lines)
+              out, n = [], 0
+              for i in range(lo, min(hi, len(lines))):
+                  n += len(lines[i]) + 1
+                  if n > CFG["max_read"]:
+                      return "\n".join(out) + f"\n…[đã hiện dòng {lo + 1}-{i}/{len(lines)}; đọc tiếp bằng start={i + 1}]"
+                  out.append(lines[i])
+              tail = f"\n[dòng {lo + 1}-{min(hi, len(lines))}/{len(lines)}]" if (s0 or e0) else ""
+              return "\n".join(out) + tail
+
+
+          def t_search_files(pattern, path="."):
+              try:
+                  rx = re.compile(pattern, re.I)
+              except re.error as e:
+                  return f"regex lỗi: {e}"
+              base = safe(path)
+              hits = []
+              for root, dirs, files in os.walk(base):
+                  dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__")]
+                  for fn in files:
+                      fp = os.path.join(root, fn)
+                      try:
+                          if os.path.getsize(fp) > 1_000_000:
+                              continue
+                          with open(fp, encoding="utf-8") as fh:
+                              for i, line in enumerate(fh, 1):
+                                  if rx.search(line):
+                                      hits.append(f"{os.path.relpath(fp, WS).replace(chr(92), '/')}:{i}: {line.strip()[:160]}")
+                                      if len(hits) >= 40:
+                                          return "\n".join(hits) + "\n…[đủ 40 kết quả, thu hẹp pattern]"
+                      except (UnicodeDecodeError, OSError):
+                          continue
+              return "\n".join(hits) or "(không thấy)"
 
 
           def t_write_file(path, content):
@@ -314,13 +357,13 @@ jobs:
               try:
                   r = subprocess.run(command, shell=True, cwd=WS, env=env, capture_output=True,
                                      text=True, timeout=CFG["command_timeout"], errors="replace")
-                  return clip(f"exit={r.returncode}\n{r.stdout}\n{r.stderr}")
+                  return clip_tail(f"exit={r.returncode}\n{r.stdout}\n{r.stderr}")
               except subprocess.TimeoutExpired:
                   return f"timeout sau {CFG['command_timeout']}s"
 
 
           FUNCS = {"list_files": t_list_files, "read_file": t_read_file, "write_file": t_write_file,
-                   "edit_file": t_edit_file, "delete_file": t_delete_file, "run_command": t_run_command}
+                   "edit_file": t_edit_file, "search_files": t_search_files, "delete_file": t_delete_file, "run_command": t_run_command}
 
 
           def _tool(name, desc, props, req):
@@ -331,15 +374,16 @@ jobs:
           # Tool + system prompt giữ CỐ ĐỊNH để provider cache được prefix
           TOOLS = [
               _tool("list_files", "Liệt kê file trong workspace", ["path"], []),
-              _tool("read_file", "Đọc file", ["path"], ["path"]),
+              _tool("read_file", "Đọc file (có thể chỉ đọc dòng start..end)", ["path", "start", "end"], ["path"]),
+              _tool("search_files", "Tìm regex trong workspace, trả path:dòng:nội dung", ["pattern", "path"], ["pattern"]),
               _tool("write_file", "Tạo/ghi đè file", ["path", "content"], ["path", "content"]),
               _tool("edit_file", "Thay đúng 1 đoạn text trong file", ["path", "old", "new"], ["path", "old", "new"]),
               _tool("delete_file", "Xoá file/thư mục", ["path"], ["path"]),
               _tool("run_command", "Chạy lệnh shell (cwd = workspace) để build/test", ["command"], ["command"]),
           ]
           SYSTEM = ("Bạn là kỹ sư phần mềm tự động. Làm việc HOÀN TOÀN trong workspace bằng tool, đường dẫn tương đối. "
-                    "Quy trình: lập kế hoạch ngắn -> viết code -> chạy build/test -> sửa lỗi -> lặp tới khi chạy được. "
-                    "Dùng edit_file cho sửa nhỏ, không ghi lại cả file. Không đọc lại file không đổi. "
+                    "Quy trình: kế hoạch ngắn -> code -> chạy build/test -> sửa lỗi -> lặp tới khi chạy được. "
+                    "Ưu tiên search_files hoặc read_file với start/end thay vì đọc cả file; edit_file cho sửa nhỏ; không đọc lại file không đổi. "
                     "Trả lời ngắn gọn bằng ngôn ngữ của người dùng. Khi xong, tóm tắt 3-5 dòng.")
 
           SESSIONS = {}
@@ -364,14 +408,47 @@ jobs:
               raise last
 
 
+          def _shrink_args(tc):
+              """Nội dung file đã nằm trên đĩa, không cần giữ lại trong lịch sử."""
+              fn = tc["function"]
+              if fn["name"] not in ("write_file", "edit_file"):
+                  return 0
+              raw = fn.get("arguments") or "{}"
+              try:
+                  a = json.loads(raw)
+              except ValueError:
+                  return 0
+              for key in ("content", "old", "new"):
+                  v = a.get(key)
+                  if isinstance(v, str) and len(v) > 200:
+                      a[key] = f"[{len(v)} ký tự, xem lại bằng read_file]"
+              new = json.dumps(a, ensure_ascii=False)
+              fn["arguments"] = new
+              return max(0, len(raw) - len(new))
+
+
           def compact(msgs, cache):
-              """Nén output tool cũ khi lịch sử quá dài (giữ 8 message cuối)."""
-              if sum(len(str(m.get("content") or "")) for m in msgs) < CFG["compact_chars"]:
+              """Khi lịch sử vượt ngưỡng, nén MỘT LẦN toàn bộ phần cũ (trừ 6 message cuối).
+              Nén theo đợt để phần đầu prompt đứng yên giữa các lần nén -> cache của API vẫn trúng."""
+              total = 0
+              for m in msgs:
+                  total += len(str(m.get("content") or ""))
+                  for tc in m.get("tool_calls") or []:
+                      total += len(tc["function"].get("arguments") or "")
+              if total < CFG["compact_chars"]:
                   return
-              for m in msgs[1:-8]:
+              saved = 0
+              for m in msgs[1:-6]:
                   if m["role"] == "tool" and len(m["content"]) > 300:
-                      m["content"] = m["content"][:200] + "\n…[đã nén]"
-              cache.clear()
+                      saved += len(m["content"]) - 215
+                      m["content"] = m["content"][:200] + "\n…[đã nén, đọc lại bằng tool nếu cần]"
+                  elif m["role"] == "assistant":
+                      for tc in m.get("tool_calls") or []:
+                          saved += _shrink_args(tc)
+              if saved:
+                  cache.clear()
+                  with STATS_LOCK:
+                      STATS["saved_chars"] += saved
 
 
           def agent_loop(msgs, model, emit, who, max_steps):
@@ -425,7 +502,7 @@ jobs:
 
 
           def make_plan(text, force):
-              user = f"Yêu cầu:\n{text}\n\nFile hiện có trong workspace:\n{clip(t_list_files(), 1500)}"
+              user = f"Yêu cầu:\n{text}\n\nFile hiện có trong workspace:\n{clip(t_list_files(), 800)}"
               if force:
                   user += "\n\nBẮT BUỘC chia thành 2-3 subtask."
               res, _, _ = call_with_fallback([{"role": "system", "content": PLAN_SYS},
@@ -474,7 +551,7 @@ jobs:
               msgs = SESSIONS.setdefault(sid, [{"role": "system", "content": SYSTEM}])
               msgs.append({"role": "user", "content": text})
               subs = None
-              if mode in ("auto", "swarm"):
+              if mode == "swarm" or (mode == "auto" and len(text) >= CFG["plan_min_chars"]):
                   try:
                       subs = make_plan(text, mode == "swarm")
                   except Exception as e:
@@ -851,8 +928,9 @@ jobs:
               $('#ws').textContent=r.workspace;$('#ws').title=r.workspace;
               $('#chips').innerHTML=
                 '<span class="chip"><b>'+s.requests+'</b>request</span>'+
-                '<span class="chip"><b>'+s.cache_hits+'</b>trúng cache</span>'+
-                '<span class="chip opt"><b>'+fmt(s.prompt)+'</b>vào'+(s.cached_prompt?' ('+fmt(s.cached_prompt)+' cached)':'')+'</span>'+
+                (s.prompt?'<span class="chip" title="Phần token vào được API cache lại"><b>'+Math.round(100*(s.cached_prompt||0)/s.prompt)+'%</b>cache API</span>':'')+
+                (s.saved_chars?'<span class="chip" title="Ước tính từ ký tự đã nén khỏi lịch sử"><b>~'+fmt(Math.round(s.saved_chars/3.5))+'</b>token đã nén</span>':'')+
+                '<span class="chip opt"><b>'+fmt(s.prompt)+'</b>vào</span>'+
                 '<span class="chip opt"><b>'+fmt(s.completion)+'</b>ra</span>';
               $('#dots').innerHTML=r.keys.map(function(k){return '<i class="'+(k.state==='ok'?'':(k.state.indexOf('tạm')===0?'wait':'bad'))+'" title="'+esc(k.key+' – '+k.state)+'"></i>'}).join('');
               $('#keyList').innerHTML=(r.keys.length?r.keys.map(function(k){return '<div class="row"><span class="id">'+esc(k.key)+'</span><span class="meta">'+esc(k.state)+'</span></div>'}).join(''):'<div class="empty">Chưa có key.</div>');
