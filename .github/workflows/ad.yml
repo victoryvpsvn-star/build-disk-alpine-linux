@@ -1,0 +1,554 @@
+name: Build XAgent exe
+
+# Toàn bộ code (server, giao diện, config, key) nằm trong file này.
+# Chỉ cần 1 file duy nhất: .github/workflows/build.yml
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Ưu tiên secret XKIRO_KEYS nếu có, không thì dùng KEYS_DEFAULT bên dưới.
+  KEYS_SECRET: ${{ secrets.XKIRO_KEYS }}
+  KEYS_DEFAULT: >-
+    sk-xt-e697f2849b0a5c243153328bf4aec7f94dab928140e37a21
+    sk-xt-dd51a0616e5ac92119e494c0b4357925e1f3922fba4a018a
+    sk-xt-d9f597a39e064fc7b0f66b7ffbfca04d521bb94f7abe260e
+    sk-xt-9852d8127da6dc8caaff94c9845fc1354bed6f68b299b01d
+    sk-xt-e3c24b1b7b563839f1aebd30467270b543c85bac33a43991
+    sk-xt-730f5daa0cd5964613d3a154b98b52202b7a4604ed1046f0
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pyinstaller
+
+      - name: Tạo source (server.py, index.html, config.json)
+        shell: bash
+        run: |
+          cat > server.py <<'XAGENT_EOF_S'
+          #!/usr/bin/env python3
+          """XAgent - auto build workflow agent.
+          Chạy tại http://127.0.0.1:3000, chỉ thao tác trong thư mục ./workspace
+          Không cần cài thêm thư viện (chỉ stdlib) nên đóng gói exe rất gọn.
+          """
+          import hashlib, json, os, re, subprocess, sys, threading, time, uuid
+          import urllib.request, urllib.error
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          # ---------- đường dẫn ----------
+          FROZEN = getattr(sys, "frozen", False)
+          BASE = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
+          RES = getattr(sys, "_MEIPASS", BASE)
+          WS = os.path.realpath(os.path.join(BASE, "workspace"))
+          CACHE_DIR = os.path.join(BASE, ".cache")
+          os.makedirs(WS, exist_ok=True)
+          os.makedirs(CACHE_DIR, exist_ok=True)
+
+          # ---------- cấu hình ----------
+          CFG = {
+              "base_url": "https://api.xkiro.com/v1",
+              "model": "moonshotai/kimi-k3-agent",
+              "max_steps": 30,
+              "temperature": 0,
+              "allow_commands": True,
+              "command_timeout": 90,
+              "max_tool_output": 6000,     # cắt output tool để tiết kiệm token
+              "compact_chars": 60000,      # vượt ngưỡng này thì nén lịch sử cũ
+              "host": "127.0.0.1",
+              "port": 3000,
+          }
+          cfg_path = os.path.join(BASE, "config.json")
+          if os.path.exists(cfg_path):
+              with open(cfg_path, encoding="utf-8") as f:
+                  CFG.update(json.load(f))
+
+
+          def load_keys():
+              p = os.path.join(BASE, "keys.txt")
+              keys = []
+              if os.path.exists(p):
+                  with open(p, encoding="utf-8") as f:
+                      for line in f:
+                          line = line.split("#")[0].strip()
+                          keys += line.split()
+              keys += [k for k in os.environ.get("XKIRO_KEYS", "").split(",") if k.strip()]
+              try:  # key được nhúng sẵn vào exe lúc build (do build.yml sinh ra)
+                  import embedded_keys
+                  keys += list(embedded_keys.KEYS)
+              except ImportError:
+                  pass
+              return list(dict.fromkeys(keys))
+
+
+          # ---------- pool key: dùng hết key này sang key khác ----------
+          class KeyPool:
+              def __init__(self, keys):
+                  self.keys = keys
+                  self.dead = {}      # key -> (until_ts | None=vĩnh viễn, lý do)
+                  self.i = 0
+                  self.lock = threading.Lock()
+
+              def get(self):
+                  with self.lock:
+                      now = time.time()
+                      for _ in range(len(self.keys)):
+                          k = self.keys[self.i % len(self.keys)]
+                          d = self.dead.get(k)
+                          if d is None or (d[0] is not None and d[0] < now):
+                              self.dead.pop(k, None)
+                              return k
+                          self.i += 1
+                      return None
+
+              def mark(self, key, permanent, reason, cooldown=60):
+                  with self.lock:
+                      self.dead[key] = (None if permanent else time.time() + cooldown, reason)
+                      self.i += 1
+
+              def status(self):
+                  with self.lock:
+                      out = []
+                      for k in self.keys:
+                          d = self.dead.get(k)
+                          out.append({"key": k[:9] + "…" + k[-4:],
+                                      "state": "ok" if not d else ("hết/lỗi: " + d[1] if d[0] is None else "tạm nghỉ: " + d[1])})
+                      return out
+
+
+          POOL = KeyPool(load_keys())
+          STATS = {"requests": 0, "cache_hits": 0, "prompt": 0, "completion": 0, "cached_prompt": 0}
+          STATS_LOCK = threading.Lock()
+
+
+          def api_request(path, payload=None, method="POST"):
+              """Gọi API, tự đổi key khi 401/402/403/429/5xx."""
+              if not POOL.keys:
+                  raise RuntimeError("Chưa có key. Điền key vào keys.txt (mỗi key 1 dòng).")
+              last = "unknown"
+              for _ in range(len(POOL.keys) * 2 + 1):
+                  key = POOL.get()
+                  if key is None:
+                      raise RuntimeError("Tất cả key đều hết hạn mức/lỗi: " + last)
+                  data = json.dumps(payload).encode() if payload is not None else None
+                  req = urllib.request.Request(CFG["base_url"].rstrip("/") + path, data=data, method=method,
+                                               headers={"Authorization": "Bearer " + key,
+                                                        "Content-Type": "application/json"})
+                  try:
+                      with urllib.request.urlopen(req, timeout=300) as r:
+                          return json.loads(r.read().decode())
+                  except urllib.error.HTTPError as e:
+                      body = e.read().decode(errors="replace")[:300]
+                      last = f"HTTP {e.code} {body}"
+                      if e.code in (401, 402, 403):
+                          POOL.mark(key, True, f"HTTP {e.code}")
+                      elif e.code == 429 or e.code >= 500:
+                          POOL.mark(key, False, f"HTTP {e.code}", 45)
+                      else:
+                          raise RuntimeError(last)
+                  except Exception as e:  # mạng
+                      last = str(e)
+                      time.sleep(1)
+              raise RuntimeError("Hết lần thử: " + last)
+
+
+          # ---------- cache phản hồi (request y hệt -> 0 token) ----------
+          def cache_get(h):
+              p = os.path.join(CACHE_DIR, h + ".json")
+              if os.path.exists(p):
+                  with open(p, encoding="utf-8") as f:
+                      return json.load(f)
+
+
+          def cache_put(h, v):
+              with open(os.path.join(CACHE_DIR, h + ".json"), "w", encoding="utf-8") as f:
+                  json.dump(v, f, ensure_ascii=False)
+
+
+          def chat_call(messages):
+              payload = {"model": CFG["model"], "messages": messages, "tools": TOOLS,
+                         "temperature": CFG["temperature"]}
+              h = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+              hit = cache_get(h) if CFG["temperature"] == 0 else None
+              with STATS_LOCK:
+                  STATS["requests"] += 1
+                  if hit:
+                      STATS["cache_hits"] += 1
+              if hit:
+                  return hit, True
+              res = api_request("/chat/completions", payload)
+              u = res.get("usage") or {}
+              cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens") or u.get("cached_tokens") or 0
+              with STATS_LOCK:
+                  STATS["prompt"] += u.get("prompt_tokens", 0)
+                  STATS["completion"] += u.get("completion_tokens", 0)
+                  STATS["cached_prompt"] += cached
+              if CFG["temperature"] == 0:
+                  cache_put(h, res)
+              return res, False
+
+
+          # ---------- tools trong workspace ----------
+          class Denied(Exception):
+              pass
+
+
+          def safe(p):
+              full = os.path.realpath(os.path.join(WS, p))
+              try:
+                  if os.path.commonpath([full, WS]) != WS:
+                      raise ValueError
+              except ValueError:
+                  raise Denied(f"Từ chối: '{p}' nằm ngoài workspace")
+              return full
+
+
+          def clip(s, n=None):
+              n = n or CFG["max_tool_output"]
+              return s if len(s) <= n else s[: n // 2] + f"\n…[cắt {len(s) - n} ký tự]…\n" + s[-n // 2:]
+
+
+          READ_CACHE = {}
+
+
+          def t_list_files(path="."):
+              base = safe(path)
+              out = []
+              for root, dirs, files in os.walk(base):
+                  dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__")]
+                  for fn in files:
+                      out.append(os.path.relpath(os.path.join(root, fn), WS).replace("\\", "/"))
+                  if len(out) > 400:
+                      break
+              return "\n".join(sorted(out)) or "(trống)"
+
+
+          def t_read_file(path):
+              f = safe(path)
+              st = os.stat(f)
+              sig = (st.st_mtime, st.st_size)
+              if READ_CACHE.get(f) == sig:
+                  return "[file không đổi từ lần đọc trước, xem lại nội dung ở trên]"
+              with open(f, encoding="utf-8", errors="replace") as fh:
+                  data = fh.read()
+              READ_CACHE[f] = sig
+              return clip(data, 12000)
+
+
+          def t_write_file(path, content):
+              f = safe(path)
+              os.makedirs(os.path.dirname(f), exist_ok=True)
+              with open(f, "w", encoding="utf-8", newline="\n") as fh:
+                  fh.write(content)
+              READ_CACHE.pop(f, None)
+              return f"đã ghi {path} ({len(content)} ký tự)"
+
+
+          def t_edit_file(path, old, new):
+              f = safe(path)
+              with open(f, encoding="utf-8") as fh:
+                  s = fh.read()
+              if s.count(old) != 1:
+                  return f"lỗi: 'old' xuất hiện {s.count(old)} lần (cần đúng 1)"
+              with open(f, "w", encoding="utf-8", newline="\n") as fh:
+                  fh.write(s.replace(old, new))
+              READ_CACHE.pop(f, None)
+              return "đã sửa " + path
+
+
+          def t_delete_file(path):
+              f = safe(path)
+              if f == WS:
+                  raise Denied("Không được xoá workspace")
+              if os.path.isdir(f):
+                  import shutil
+                  shutil.rmtree(f)
+              else:
+                  os.remove(f)
+              return "đã xoá " + path
+
+
+          BAD_CMD = re.compile(r"\b(shutdown|reboot|format|diskpart|reg(\.exe)?\s|netsh|schtasks|sc\s+(stop|delete)|"
+                               r"curl|wget|Invoke-WebRequest|Invoke-Expression|iex|powershell\s+-e|mklink|takeown|icacls)\b", re.I)
+
+
+          def t_run_command(command):
+              if not CFG["allow_commands"]:
+                  raise Denied("run_command đang tắt trong config.json")
+              if BAD_CMD.search(command):
+                  raise Denied("Lệnh bị chặn bởi bộ lọc an toàn")
+              for tok in re.split(r"[\s\"'=;&|<>]+", command):
+                  if not tok:
+                      continue
+                  if ".." in tok.replace("\\", "/").split("/") or re.match(r"^([A-Za-z]:|[\\/]|~|%|\$)", tok):
+                      if tok in ("/c", "/s", "/q", "/f"):
+                          continue
+                      safe(tok)  # đường dẫn tuyệt đối/.. phải nằm trong workspace
+              env = {k: v for k, v in os.environ.items() if k.upper() in ("PATH", "SYSTEMROOT", "COMSPEC", "PATHEXT", "LANG")}
+              env.update({"TEMP": WS, "TMP": WS, "HOME": WS, "USERPROFILE": WS})
+              try:
+                  r = subprocess.run(command, shell=True, cwd=WS, env=env, capture_output=True,
+                                     text=True, timeout=CFG["command_timeout"], errors="replace")
+                  return clip(f"exit={r.returncode}\n{r.stdout}\n{r.stderr}")
+              except subprocess.TimeoutExpired:
+                  return f"timeout sau {CFG['command_timeout']}s"
+
+
+          FUNCS = {"list_files": t_list_files, "read_file": t_read_file, "write_file": t_write_file,
+                   "edit_file": t_edit_file, "delete_file": t_delete_file, "run_command": t_run_command}
+
+
+          def _tool(name, desc, props, req):
+              return {"type": "function", "function": {"name": name, "description": desc,
+                      "parameters": {"type": "object", "properties": {k: {"type": "string"} for k in props}, "required": req}}}
+
+
+          # Tool + system prompt giữ CỐ ĐỊNH để provider cache được prefix
+          TOOLS = [
+              _tool("list_files", "Liệt kê file trong workspace", ["path"], []),
+              _tool("read_file", "Đọc file", ["path"], ["path"]),
+              _tool("write_file", "Tạo/ghi đè file", ["path", "content"], ["path", "content"]),
+              _tool("edit_file", "Thay đúng 1 đoạn text trong file", ["path", "old", "new"], ["path", "old", "new"]),
+              _tool("delete_file", "Xoá file/thư mục", ["path"], ["path"]),
+              _tool("run_command", "Chạy lệnh shell (cwd = workspace) để build/test", ["command"], ["command"]),
+          ]
+          SYSTEM = ("Bạn là kỹ sư phần mềm tự động. Làm việc HOÀN TOÀN trong workspace bằng tool, đường dẫn tương đối. "
+                    "Quy trình: lập kế hoạch ngắn -> viết code -> chạy build/test -> sửa lỗi -> lặp tới khi chạy được. "
+                    "Dùng edit_file cho sửa nhỏ, không ghi lại cả file. Không đọc lại file không đổi. "
+                    "Trả lời ngắn gọn bằng ngôn ngữ của người dùng. Khi xong, tóm tắt 3-5 dòng.")
+
+          SESSIONS = {}
+
+
+          def compact(msgs):
+              """Nén output tool cũ khi lịch sử quá dài (giữ 8 message cuối)."""
+              if sum(len(str(m.get("content") or "")) for m in msgs) < CFG["compact_chars"]:
+                  return
+              for m in msgs[1:-8]:
+                  if m["role"] == "tool" and len(m["content"]) > 300:
+                      m["content"] = m["content"][:200] + "\n…[đã nén]"
+              READ_CACHE.clear()
+
+
+          def run_agent(sid, user_text, emit):
+              msgs = SESSIONS.setdefault(sid, [{"role": "system", "content": SYSTEM}])
+              msgs.append({"role": "user", "content": user_text})
+              for step in range(CFG["max_steps"]):
+                  compact(msgs)
+                  res, hit = chat_call(msgs)
+                  m = res["choices"][0]["message"]
+                  entry = {"role": "assistant", "content": m.get("content") or ""}
+                  if m.get("tool_calls"):
+                      entry["tool_calls"] = m["tool_calls"]
+                  msgs.append(entry)
+                  if m.get("content"):
+                      emit({"type": "text", "text": m["content"], "cached": hit})
+                  if not m.get("tool_calls"):
+                      break
+                  for tc in m["tool_calls"]:
+                      name = tc["function"]["name"]
+                      try:
+                          args = json.loads(tc["function"].get("arguments") or "{}")
+                          emit({"type": "tool", "name": name, "args": clip(json.dumps(args, ensure_ascii=False), 400)})
+                          out = FUNCS[name](**args)
+                      except Denied as e:
+                          out = str(e)
+                      except Exception as e:
+                          out = f"lỗi: {type(e).__name__}: {e}"
+                      out = clip(str(out))
+                      emit({"type": "result", "text": clip(out, 600)})
+                      msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": out})
+              else:
+                  emit({"type": "text", "text": f"(dừng: đạt {CFG['max_steps']} bước)"})
+              emit({"type": "done", "stats": STATS})
+
+
+          # ---------- HTTP ----------
+          class H(BaseHTTPRequestHandler):
+              def log_message(self, *a):
+                  pass
+
+              def _json(self, obj, code=200):
+                  b = json.dumps(obj, ensure_ascii=False).encode()
+                  self.send_response(code)
+                  self.send_header("Content-Type", "application/json; charset=utf-8")
+                  self.send_header("Content-Length", str(len(b)))
+                  self.end_headers()
+                  self.wfile.write(b)
+
+              def do_GET(self):
+                  if self.path in ("/", "/index.html"):
+                      with open(os.path.join(RES, "index.html"), "rb") as f:
+                          b = f.read()
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/html; charset=utf-8")
+                      self.send_header("Content-Length", str(len(b)))
+                      self.end_headers()
+                      self.wfile.write(b)
+                  elif self.path == "/api/models":
+                      try:
+                          self._json(api_request("/models", method="GET"))
+                      except Exception as e:
+                          self._json({"error": str(e)}, 502)
+                  elif self.path == "/api/stats":
+                      self._json({"stats": STATS, "keys": POOL.status(), "model": CFG["model"], "workspace": WS})
+                  elif self.path == "/api/files":
+                      self._json({"files": t_list_files()})
+                  else:
+                      self._json({"error": "not found"}, 404)
+
+              def do_POST(self):
+                  n = int(self.headers.get("Content-Length") or 0)
+                  body = json.loads(self.rfile.read(n) or b"{}")
+                  if self.path == "/api/reset":
+                      SESSIONS.pop(body.get("sid", ""), None)
+                      return self._json({"ok": True})
+                  if self.path != "/api/chat":
+                      return self._json({"error": "not found"}, 404)
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                  self.send_header("Cache-Control", "no-cache")
+                  self.end_headers()
+
+                  def emit(o):
+                      self.wfile.write((json.dumps(o, ensure_ascii=False) + "\n").encode())
+                      self.wfile.flush()
+                  try:
+                      run_agent(body.get("sid") or uuid.uuid4().hex, body.get("message", ""), emit)
+                  except Exception as e:
+                      try:
+                          emit({"type": "error", "text": str(e)})
+                      except Exception:
+                          pass
+
+
+          if __name__ == "__main__":
+              srv = ThreadingHTTPServer((CFG["host"], CFG["port"]), H)
+              print(f"XAgent: http://{CFG['host']}:{CFG['port']}  | workspace: {WS} | keys: {len(POOL.keys)} | model: {CFG['model']}")
+              try:
+                  srv.serve_forever()
+              except KeyboardInterrupt:
+                  pass
+          XAGENT_EOF_S
+          cat > index.html <<'XAGENT_EOF_I'
+          <!doctype html>
+          <html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>XAgent</title>
+          <style>
+          :root{--bg:#fff;--fg:#1a1a1a;--mut:#6b7280;--card:#f3f4f6;--acc:#2563eb;--bd:#e5e7eb}
+          @media(prefers-color-scheme:dark){:root{--bg:#111318;--fg:#e5e7eb;--mut:#9ca3af;--card:#1b1e26;--acc:#60a5fa;--bd:#2a2e38}}
+          *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif;display:flex;height:100vh}
+          aside{width:300px;border-right:1px solid var(--bd);padding:12px;overflow:auto}
+          main{flex:1;display:flex;flex-direction:column;min-width:0}
+          #log{flex:1;overflow:auto;padding:16px}
+          .m{margin:8px 0;padding:10px 12px;border-radius:8px;background:var(--card);white-space:pre-wrap;word-break:break-word}
+          .u{background:var(--acc);color:#fff}.t{font:12px ui-monospace,monospace;color:var(--mut)}.e{color:#dc2626}
+          form{display:flex;gap:8px;padding:12px;border-top:1px solid var(--bd)}
+          textarea{flex:1;resize:none;height:56px;padding:8px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--fg);font:inherit}
+          button{padding:8px 14px;border:0;border-radius:8px;background:var(--acc);color:#fff;cursor:pointer}
+          button.g{background:var(--card);color:var(--fg);border:1px solid var(--bd);width:100%;margin-bottom:8px}
+          h4{margin:14px 0 6px}pre{white-space:pre-wrap;font-size:12px;color:var(--mut);margin:0}
+          table{width:100%;font-size:12px;border-collapse:collapse}td,th{border-bottom:1px solid var(--bd);padding:3px;text-align:left}
+          @media(max-width:700px){aside{display:none}}
+          </style></head><body>
+          <aside>
+            <button class="g" onclick="models()">Models &amp; giá</button>
+            <button class="g" onclick="stats()">Key &amp; token cache</button>
+            <button class="g" onclick="files()">File trong workspace</button>
+            <button class="g" onclick="reset()">Phiên mới</button>
+            <div id="side"></div>
+          </aside>
+          <main>
+            <div id="log"></div>
+            <form onsubmit="send(event)"><textarea id="q" placeholder="Mô tả thứ cần build… (Enter gửi, Shift+Enter xuống dòng)"></textarea><button id="b">Chạy</button></form>
+          </main>
+          <script>
+          let sid=crypto.randomUUID();const log=document.getElementById('log'),q=document.getElementById('q'),side=document.getElementById('side');
+          q.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send(e)}});
+          function add(c,t){const d=document.createElement('div');d.className='m '+c;d.textContent=t;log.appendChild(d);log.scrollTop=log.scrollHeight}
+          async function send(e){e.preventDefault();const m=q.value.trim();if(!m)return;q.value='';add('u',m);document.getElementById('b').disabled=true;
+           try{const r=await fetch('/api/chat',{method:'POST',body:JSON.stringify({sid,message:m})});
+           const rd=r.body.getReader(),dc=new TextDecoder();let buf='';
+           while(true){const{done,value}=await rd.read();if(done)break;buf+=dc.decode(value,{stream:true});let i;
+            while((i=buf.indexOf('\n'))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);if(!l)continue;const o=JSON.parse(l);
+             if(o.type==='text')add('',(o.cached?'[cache] ':'')+o.text);
+             else if(o.type==='tool')add('t','▶ '+o.name+' '+o.args);
+             else if(o.type==='result')add('t',o.text);
+             else if(o.type==='error')add('e','Lỗi: '+o.text);
+             else if(o.type==='done')stats(true)}}}
+           catch(x){add('e',String(x))}document.getElementById('b').disabled=false}
+          async function models(){side.innerHTML='Đang tải…';const r=await(await fetch('/api/models')).json();
+           if(r.error){side.innerHTML='<div class=e>'+r.error+'</div>';return}
+           const list=r.data||r.models||r;const rows=list.map(m=>{const p=m.pricing||{};const price=Object.keys(p).length?JSON.stringify(p):
+            ['input_price','output_price','prompt_price','completion_price','price'].filter(k=>m[k]!=null).map(k=>k+': '+m[k]).join(', ');
+            return '<tr><td>'+(m.id||m.name)+'</td><td>'+(price||'—')+'</td></tr>'}).join('');
+           side.innerHTML='<h4>'+list.length+' model</h4><table><tr><th>ID</th><th>Giá</th></tr>'+rows+'</table>'}
+          async function stats(quiet){const r=await(await fetch('/api/stats')).json();const s=r.stats;
+           side.innerHTML='<h4>Model</h4><pre>'+r.model+'</pre><h4>Token</h4><pre>request: '+s.requests+'\ncache local: '+s.cache_hits+'\nprompt: '+s.prompt+' (cached '+s.cached_prompt+')\ncompletion: '+s.completion+'</pre><h4>Keys</h4><pre>'+r.keys.map(k=>k.key+'  '+k.state).join('\n')+'</pre>'}
+          async function files(){const r=await(await fetch('/api/files')).json();side.innerHTML='<h4>workspace</h4><pre>'+r.files+'</pre>'}
+          async function reset(){await fetch('/api/reset',{method:'POST',body:JSON.stringify({sid})});sid=crypto.randomUUID();log.innerHTML=''}
+          stats();
+          </script></body></html>
+          XAGENT_EOF_I
+          cat > config.json <<'XAGENT_EOF_C'
+          {
+            "base_url": "https://api.xkiro.com/v1",
+            "model": "moonshotai/kimi-k3-agent",
+            "max_steps": 30,
+            "temperature": 0,
+            "allow_commands": true
+          }
+          XAGENT_EOF_C
+
+      - name: Nhúng key vào exe
+        shell: python
+        run: |
+          import os, re
+          raw = os.environ.get("KEYS_SECRET", "").strip() or os.environ["KEYS_DEFAULT"]
+          keys = [k for k in re.split(r"[\s,]+", raw) if k]
+          open("embedded_keys.py", "w").write("KEYS = " + repr(keys) + "\n")
+          print(f"Nhúng {len(keys)} key")
+
+      - name: Smoke test
+        shell: python
+        run: |
+          import server as s
+          assert len(s.POOL.keys) > 0, "không có key"
+          try:
+              s.t_read_file("../x"); raise SystemExit("sandbox FAIL")
+          except s.Denied:
+              print("sandbox OK,", len(s.POOL.keys), "key")
+
+      - name: Build exe
+        run: pyinstaller --onefile --name XAgent --hidden-import embedded_keys --add-data "index.html;." server.py
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out/XAgent/workspace
+          cp dist/XAgent.exe config.json out/XAgent/
+          cd out && 7z a ../XAgent-windows.zip XAgent
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XAgent-windows
+          path: XAgent-windows.zip
+
+      - name: Release (draft)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: XAgent-windows.zip
+          draft: true
