@@ -22,6 +22,18 @@ env:
     sk-xt-9852d8127da6dc8caaff94c9845fc1354bed6f68b299b01d
     sk-xt-e3c24b1b7b563839f1aebd30467270b543c85bac33a43991
     sk-xt-730f5daa0cd5964613d3a154b98b52202b7a4604ed1046f0
+  # GLM (z.ai) và Agnes: ưu tiên secret ZAI_KEYS / AGNES_KEYS nếu có.
+  ZAI_SECRET: ${{ secrets.ZAI_KEYS }}
+  AGNES_SECRET: ${{ secrets.AGNES_KEYS }}
+  ZAI_DEFAULT: >-
+    380f36297e7343fd86fa7cba3094df43.Q1ExqNUrFEkke2aM
+    f57903d148aa45128665377bb290de18.5cw13jsXfR0Jlm71
+    135cf879fca84ff5873a196544136ab7.0oHIJJaN1xw7PdAW
+    776a4f5866854425ac96e2bfff1bb269.gvAjHbYnevnjJjrz
+    94d9d4b7579c435f8ac6e615c5761737.LaypNeT9pVPkZwfl
+  AGNES_DEFAULT: >-
+    sk-wO4ZfAmRQCKu1PE9byo6DpF0u3vRSrRpoQAUZ0B4UdD2FSUB
+    sk-LysTVviWtaO4KVUFxERGPJpCkof9d5ehDDe0W5dwgJPstey1
 
 jobs:
   build:
@@ -61,9 +73,10 @@ jobs:
           CFG = {
               "base_url": "https://api.xkiro.com/v1",
               # Danh sách model, thứ tự ưu tiên. Model đầu = planner + tích hợp. Lỗi thì tự chuyển model kế tiếp.
+              # glm-4.5-flash (z.ai) và agnes-2.5-flash / agnes-2.0-flash (Agnes, free) chạy qua provider riêng (xem EXTRA).
               "models": ["qwen/qwen3.8-max:free", "qwen/qwen3.7-max:free", "qwen/qwen3-coder-plus:free",
                          "mistralai/devstral-medium", "mistralai/codestral-2508", "qwen/qwen3.6-plus:free",
-                         "moonshotai/kimi-k3-agent"],
+                         "moonshotai/kimi-k3-agent", "glm-4.5-flash", "agnes-2.5-flash", "agnes-2.0-flash"],
               # 3 worker chạy song song khi việc khó
               "workers": ["qwen/qwen3.8-max:free", "qwen/qwen3.7-max:free", "mistralai/devstral-medium"],
               "worker_steps": 20,
@@ -138,6 +151,25 @@ jobs:
 
 
           POOL = KeyPool(load_keys())
+
+
+          def _emb(name):
+              try:
+                  import embedded_keys
+                  return list(getattr(embedded_keys, name, []))
+              except ImportError:
+                  return []
+
+
+          # GLM (z.ai) và Agnes: khác base_url + key với xkiro nên có pool key riêng
+          EXTRA = {
+              "glm-4.5-flash": {"base_url": "https://api.z.ai/api/paas/v4", "model": "glm-4.5-flash",
+                                "extra": {"thinking": {"type": "disabled"}}, "pool": KeyPool(_emb("ZAI_KEYS"))},
+              "agnes-2.5-flash": {"base_url": "https://apihub.agnes-ai.com/v1", "model": "agnes-2.5-flash",
+                                  "extra": {}, "pool": KeyPool(_emb("AGNES_KEYS"))},
+              "agnes-2.0-flash": {"base_url": "https://apihub.agnes-ai.com/v1", "model": "agnes-2.0-flash",
+                                  "extra": {}, "pool": KeyPool(_emb("AGNES_KEYS"))},
+          }
           STATS = {"requests": 0, "cache_hits": 0, "prompt": 0, "completion": 0, "cached_prompt": 0, "saved_chars": 0}
           STATS_LOCK = threading.Lock()
 
@@ -145,18 +177,20 @@ jobs:
           UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 XAgent/1.0"
 
 
-          def api_request(path, payload=None, method="POST"):
+          def api_request(path, payload=None, method="POST", prov=None):
               """Gọi API, tự đổi key khi 401/402/403/429/5xx."""
-              if not POOL.keys:
+              pool = prov["pool"] if prov else POOL
+              base = prov["base_url"] if prov else CFG["base_url"]
+              if not pool.keys:
                   raise RuntimeError("Chưa có key. Điền key vào keys.txt (mỗi key 1 dòng).")
               last = "unknown"
-              for _ in range(len(POOL.keys) * 2 + 1):
-                  key = POOL.get()
+              for _ in range(len(pool.keys) * 2 + 1):
+                  key = pool.get()
                   if key is None:
-                      why = "; ".join(f"{k['key']} {k['state']}" for k in POOL.status())
+                      why = "; ".join(f"{k['key']} {k['state']}" for k in pool.status())
                       raise RuntimeError("Tất cả key đều hết hạn mức/lỗi: " + (why if last == "unknown" else last))
                   data = json.dumps(payload).encode() if payload is not None else None
-                  req = urllib.request.Request(CFG["base_url"].rstrip("/") + path, data=data, method=method,
+                  req = urllib.request.Request(base.rstrip("/") + path, data=data, method=method,
                                                headers={"Authorization": "Bearer " + key,
                                                         "Content-Type": "application/json",
                                                         "Accept": "application/json",
@@ -171,9 +205,9 @@ jobs:
                       if "1010" in body or "cloudflare" in body.lower():
                           raise RuntimeError("Cloudflare chặn request (error 1010), không phải lỗi key: " + body[:120])
                       if e.code in (401, 402, 403):
-                          POOL.mark(key, True, f"HTTP {e.code}")
+                          pool.mark(key, True, f"HTTP {e.code}")
                       elif e.code == 429 or e.code >= 500:
-                          POOL.mark(key, False, f"HTTP {e.code}", 45)
+                          pool.mark(key, False, f"HTTP {e.code}", 45)
                       else:
                           raise RuntimeError(last)
                   except Exception as e:  # mạng
@@ -196,7 +230,10 @@ jobs:
 
 
           def chat_call(messages, model, tools=None):
-              payload = {"model": model, "messages": messages, "temperature": CFG["temperature"]}
+              prov = EXTRA.get(model)
+              payload = {"model": prov["model"] if prov else model, "messages": messages, "temperature": CFG["temperature"]}
+              if prov:
+                  payload.update(prov["extra"])
               if tools:
                   payload["tools"] = tools
               h = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -207,7 +244,7 @@ jobs:
                       STATS["cache_hits"] += 1
               if hit:
                   return hit, True
-              res = api_request("/chat/completions", payload)
+              res = api_request("/chat/completions", payload, prov=prov)
               u = res.get("usage") or {}
               cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens") or u.get("cached_tokens") or 0
               with STATS_LOCK:
@@ -388,23 +425,83 @@ jobs:
 
           SESSIONS = {}
 
+          # ---------- neuro.md: bộ nhớ riêng của từng chat (hệ thống tự ghi, agent mở ra đọc khi quên) ----------
+          NEURO_LOCK = threading.Lock()
+          NEURO_MAX = 40000
+
+
+          def neuro_id(sid):
+              return re.sub(r"[^A-Za-z0-9]", "", str(sid))[:12] or "chat"
+
+
+          def neuro_rel(nid):
+              return f"neuro/{nid}/neuro.md"
+
+
+          def neuro_note(nid):
+              return (f"\nBỘ NHỚ CHAT: file {neuro_rel(nid)} (trong workspace) ghi lại yêu cầu, file đã tạo/sửa, lệnh đã chạy và kết quả của chat này. "
+                      "Hệ thống tự ghi, bạn chỉ cần đọc. Khi quên hoặc lịch sử bị nén, read_file file này trước khi làm tiếp.")
+
+
+          def neuro_log(nid, who, text):
+              if not nid:
+                  return
+              p = os.path.join(WS, "neuro", nid, "neuro.md")
+              line = " ".join(str(text).split())
+              with NEURO_LOCK:
+                  try:
+                      os.makedirs(os.path.dirname(p), exist_ok=True)
+                      if not os.path.exists(p):
+                          with open(p, "w", encoding="utf-8", newline="\n") as f:
+                              f.write("# neuro.md - bộ nhớ chat\n\n")
+                      with open(p, "a", encoding="utf-8", newline="\n") as f:
+                          f.write(f"- [{time.strftime('%H:%M:%S')}] **{who}**: {line}\n")
+                      if os.path.getsize(p) > NEURO_MAX:
+                          with open(p, encoding="utf-8", errors="replace") as f:
+                              body = f.read()
+                          tail = body[-(NEURO_MAX * 3 // 4):]
+                          tail = tail[tail.find("\n") + 1:]
+                          with open(p, "w", encoding="utf-8", newline="\n") as f:
+                              f.write("# neuro.md - bộ nhớ chat\n\n- …(đã lược bớt phần cũ)\n" + tail)
+                  except OSError:
+                      pass
+
+
+          def neuro_tool(nid, who, name, raw, out):
+              """Chỉ ghi thao tác làm thay đổi workspace; bỏ qua đọc/liệt kê cho đỡ nhiễu."""
+              if name not in ("write_file", "edit_file", "delete_file", "run_command"):
+                  return
+              try:
+                  a = json.loads(raw or "{}")
+              except ValueError:
+                  a = {}
+              if name == "run_command":
+                  first = (str(out).splitlines() or [""])[0]
+                  neuro_log(nid, who, f"chạy `{clip(str(a.get('command', '')), 150)}` -> {first}")
+              else:
+                  neuro_log(nid, who, f"{name} {a.get('path', '')} -> {clip(str(out), 120)}")
+
 
           def short(m):
               return m.split("/")[-1].replace(":free", "")
 
 
           def call_with_fallback(messages, prefer, tools=None):
-              """Thử model ưu tiên, lỗi thì lần lượt các model còn lại."""
+              """Thử model ưu tiên, lỗi thì lần lượt các model còn lại.
+              Key xkiro hết -> bỏ qua các model xkiro nhưng vẫn thử GLM / Agnes."""
               order = [prefer] + [m for m in CFG["models"] if m != prefer]
               last = None
+              main_dead = False
               for m in order:
+                  if main_dead and m not in EXTRA:
+                      continue
                   try:
                       res, hit = chat_call(messages, m, tools)
                       return res, hit, m
                   except RuntimeError as e:
                       last = e
-                      if "Tất cả key" in str(e) or "Chưa có key" in str(e):
-                          break
+                      if m not in EXTRA and ("Tất cả key" in str(e) or "Chưa có key" in str(e)):
+                          main_dead = True
               raise last
 
 
@@ -441,7 +538,7 @@ jobs:
               for m in msgs[1:-6]:
                   if m["role"] == "tool" and len(m["content"]) > 300:
                       saved += len(m["content"]) - 215
-                      m["content"] = m["content"][:200] + "\n…[đã nén, đọc lại bằng tool nếu cần]"
+                      m["content"] = m["content"][:200] + "\n…[đã nén, xem neuro.md hoặc đọc lại bằng tool]"
                   elif m["role"] == "assistant":
                       for tc in m.get("tool_calls") or []:
                           saved += _shrink_args(tc)
@@ -451,7 +548,7 @@ jobs:
                       STATS["saved_chars"] += saved
 
 
-          def agent_loop(msgs, model, emit, who, max_steps):
+          def agent_loop(msgs, model, emit, who, max_steps, sid=None):
               """Vòng lặp agent: gọi model -> chạy tool -> lặp. Trả về câu trả lời cuối."""
               cache = {}
               last = ""
@@ -468,6 +565,8 @@ jobs:
                       last = m["content"]
                       emit({"type": "text", "who": tag, "text": m["content"], "cached": hit})
                   if not m.get("tool_calls"):
+                      if last:
+                          neuro_log(sid, who, "kết quả: " + clip(last, 600))
                       return last
                   for tc in m["tool_calls"]:
                       name = tc["function"]["name"]
@@ -484,6 +583,7 @@ jobs:
                       except Exception as e:
                           out = f"lỗi: {type(e).__name__}: {e}"
                       out = clip(str(out))
+                      neuro_tool(sid, who, name, tc["function"].get("arguments"), out)
                       emit({"type": "result", "who": who, "text": clip(out, 600)})
                       msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": out})
               emit({"type": "text", "who": who, "text": f"(dừng: đạt {max_steps} bước)"})
@@ -519,19 +619,19 @@ jobs:
               return subs[:3] if d.get("hard") and len(subs) >= 2 else None
 
 
-          def run_swarm(text, subs, msgs, emit):
+          def run_swarm(text, subs, msgs, emit, workers=None, sid=None):
               titles = "\n".join(f"{i + 1}. {x.get('title', '')}" for i, x in enumerate(subs))
               emit({"type": "text", "who": "Planner", "text": f"Việc khó -> chia {len(subs)} phần chạy song song:\n{titles}"})
               results = [None] * len(subs)
 
               def work(i, x):
-                  model = CFG["workers"][i % len(CFG["workers"])]
+                  model = (workers or CFG["workers"])[i % len(workers or CFG["workers"])]
                   wm = [{"role": "system", "content": WORKER_SYS},
                         {"role": "user", "content": f"Yêu cầu tổng: {text}\n\nKế hoạch chung:\n{titles}\n\n"
                                                     f"Bạn là worker #{i + 1}. Nhiệm vụ: {x.get('title')}\n{x.get('goal')}\n\n"
                                                     "Chỉ tạo/sửa file thuộc phần của bạn."}]
                   try:
-                      results[i] = agent_loop(wm, model, emit, f"W{i + 1}", CFG["worker_steps"]) or "(không có báo cáo)"
+                      results[i] = agent_loop(wm, model, emit, f"W{i + 1}", CFG["worker_steps"], sid=sid) or "(không có báo cáo)"
                   except Exception as e:
                       results[i] = f"LỖI: {e}"
 
@@ -544,11 +644,14 @@ jobs:
               msgs.append({"role": "user", "content":
                            "[HỆ THỐNG] Các worker đã xong. Báo cáo:\n" + report +
                            "\n\nHãy kiểm tra workspace, ghép nối các phần, chạy build/test, sửa lỗi, rồi tóm tắt."})
-              agent_loop(msgs, CFG["models"][0], emit, "Tích hợp", CFG["max_steps"])
+              agent_loop(msgs, CFG["models"][0], emit, "Tích hợp", CFG["max_steps"], sid=sid)
 
 
-          def run_agent(sid, text, mode, emit):
-              msgs = SESSIONS.setdefault(sid, [{"role": "system", "content": SYSTEM}])
+          def run_agent(sid, text, mode, emit, workers=None):
+              workers = [w for w in (workers or []) if w in CFG["models"]] or None
+              nid = neuro_id(sid)
+              neuro_log(nid, "Người dùng", "Yêu cầu: " + clip(text, 800))
+              msgs = SESSIONS.setdefault(sid, [{"role": "system", "content": SYSTEM + neuro_note(nid)}])
               msgs.append({"role": "user", "content": text})
               subs = None
               if mode == "swarm" or (mode == "auto" and len(text) >= CFG["plan_min_chars"]):
@@ -557,9 +660,9 @@ jobs:
                   except Exception as e:
                       emit({"type": "text", "who": "Planner", "text": f"(bỏ qua chia việc: {e})"})
               if subs:
-                  run_swarm(text, subs, msgs, emit)
+                  run_swarm(text, subs, msgs, emit, workers, nid)
               else:
-                  agent_loop(msgs, CFG["models"][0], emit, "Main", CFG["max_steps"])
+                  agent_loop(msgs, CFG["models"][0], emit, "Main", CFG["max_steps"], sid=nid)
               emit({"type": "done", "stats": STATS})
 
 
@@ -591,7 +694,7 @@ jobs:
                       except Exception as e:
                           self._json({"error": str(e)}, 502)
                   elif self.path == "/api/stats":
-                      self._json({"stats": STATS, "keys": POOL.status(), "model": CFG["models"], "workspace": WS})
+                      self._json({"stats": STATS, "keys": POOL.status(), "model": CFG["models"], "workers": CFG["workers"], "workspace": WS})
                   elif self.path == "/api/files":
                       self._json({"files": t_list_files()})
                   else:
@@ -617,7 +720,7 @@ jobs:
                           self.wfile.write((json.dumps(o, ensure_ascii=False) + "\n").encode())
                           self.wfile.flush()
                   try:
-                      run_agent(body.get("sid") or uuid.uuid4().hex, body.get("message", ""), body.get("mode", "auto"), emit)
+                      run_agent(body.get("sid") or uuid.uuid4().hex, body.get("message", ""), body.get("mode", "auto"), emit, body.get("workers"))
                   except Exception as e:
                       try:
                           emit({"type": "error", "text": str(e)})
@@ -763,6 +866,9 @@ jobs:
           #run{background:var(--accent);color:var(--accent-ink)}
           #stop{background:var(--danger);color:#fff}
 
+          dialog{border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--ink);padding:16px;min-width:320px;max-width:92vw}
+          dialog::backdrop{background:rgba(0,0,0,.4)}
+          dialog label{display:block;margin-top:8px;color:var(--mut);font-size:12.5px}
           @keyframes pulse{50%{opacity:.25}}
           @media (prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important}}
           @media (max-width:860px){
@@ -837,12 +943,13 @@ jobs:
             </div>
           </div>
 
+          <dialog id="pick"></dialog>
           <script>
           (function(){
           var $=function(s,r){return (r||document).querySelector(s)};
           var stream=$('#stream'),inner=$('#inner'),q=$('#q'),runBtn=$('#run'),stopBtn=$('#stop');
           var sid=(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random());
-          var ctrl=null,order=[];
+          var ctrl=null,order=[],defW=[],picked=null;
 
           function el(tag,cls,html){var e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e}
           function esc(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
@@ -924,7 +1031,7 @@ jobs:
           /* stats */
           function refresh(){
             return fetch('/api/stats').then(function(r){return r.json()}).then(function(r){
-              var s=r.stats;order=Array.isArray(r.model)?r.model:[r.model];
+              var s=r.stats;order=Array.isArray(r.model)?r.model:[r.model];defW=r.workers||[];
               $('#ws').textContent=r.workspace;$('#ws').title=r.workspace;
               $('#chips').innerHTML=
                 '<span class="chip"><b>'+s.requests+'</b>request</span>'+
@@ -986,7 +1093,7 @@ jobs:
           }
           function setBusy(b){runBtn.hidden=b;stopBtn.hidden=!b;q.disabled=b;if(!b)q.focus()}
 
-          function send(text){
+          function doSend(text,workers){
             text=(text||'').trim();if(!text||ctrl)return;
             var hello=$('#hello');if(hello)hello.remove();
             var turn=el('div','turn');turn.appendChild(el('div','user',esc(text)));
@@ -996,7 +1103,7 @@ jobs:
             q.value='';autosize();setBusy(true);
             ctrl=new AbortController();
             var mode=$('input[name=mode]:checked').value;
-            fetch('/api/chat',{method:'POST',signal:ctrl.signal,body:JSON.stringify({sid:sid,message:text,mode:mode})}).then(function(r){
+            fetch('/api/chat',{method:'POST',signal:ctrl.signal,body:JSON.stringify({sid:sid,message:text,mode:mode,workers:workers})}).then(function(r){
               var rd=r.body.getReader(),dc=new TextDecoder(),buf='';
               function pump(){
                 return rd.read().then(function(x){
@@ -1014,6 +1121,26 @@ jobs:
               if(e&&e.name==='AbortError')flow.appendChild(el('div','note','Đã dừng xem kết quả. Server có thể còn chạy nốt bước hiện tại.'));
               else flow.appendChild(el('div','note','<b>Mất kết nối:</b> '+esc(e)));
             }).then(function(){finishLanes();ctrl=null;setBusy(false);refresh()});
+          }
+          function pickWorkers(cb){
+            var d=$('#pick');
+            var sels=[0,1,2].map(function(i){
+              var cur=(picked||defW)[i]||order[i%order.length];
+              return '<label>Worker W'+(i+1)+'<select class="field" data-i="'+i+'">'+order.map(function(m){return '<option'+(m===cur?' selected':'')+'>'+esc(m)+'</option>'}).join('')+'</select></label>';
+            }).join('');
+            d.innerHTML='<h4 style="margin:0 0 4px">Chọn 3 model chạy song song</h4>'+sels+
+              '<div class="bar" style="margin-top:14px"><button class="btn" type="button" id="pkNo">Huỷ</button><span class="sp"></span><button class="btn" type="button" id="pkOk" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent)">Chạy</button></div>';
+            $('#pkNo').onclick=function(){d.close()};
+            $('#pkOk').onclick=function(){
+              picked=Array.prototype.map.call(d.querySelectorAll('select'),function(s){return s.value});
+              d.close();cb(picked);
+            };
+            d.showModal();
+          }
+          function send(text){
+            text=(text||'').trim();if(!text||ctrl)return;
+            if($('input[name=mode]:checked').value==='swarm')return pickWorkers(function(w){doSend(text,w)});
+            doSend(text,null);
           }
           $('#composer').onsubmit=function(e){e.preventDefault();send(q.value)};
           stopBtn.onclick=function(){if(ctrl)ctrl.abort()};
@@ -1054,10 +1181,14 @@ jobs:
         shell: python
         run: |
           import os, re
-          raw = os.environ.get("KEYS_SECRET", "").strip() or os.environ["KEYS_DEFAULT"]
-          keys = [k for k in re.split(r"[\s,]+", raw) if k]
-          open("embedded_keys.py", "w").write("KEYS = " + repr(keys) + "\n")
-          print(f"Nhúng {len(keys)} key")
+          def pick(secret, default):
+              raw = os.environ.get(secret, "").strip() or os.environ[default]
+              return [k for k in re.split(r"[\s,]+", raw) if k]
+          keys = pick("KEYS_SECRET", "KEYS_DEFAULT")
+          zai = pick("ZAI_SECRET", "ZAI_DEFAULT")
+          agnes = pick("AGNES_SECRET", "AGNES_DEFAULT")
+          open("embedded_keys.py", "w").write(f"KEYS = {keys!r}\nZAI_KEYS = {zai!r}\nAGNES_KEYS = {agnes!r}\n")
+          print(f"Nhúng {len(keys)} key xkiro, {len(zai)} key glm, {len(agnes)} key agnes")
 
       - name: Smoke test
         shell: python
@@ -1066,6 +1197,8 @@ jobs:
           sys.path.insert(0, os.getcwd())
           import server as s
           assert len(s.POOL.keys) > 0, "không có key"
+          assert len(s.EXTRA["glm-4.5-flash"]["pool"].keys) > 0, "không có key glm"
+          assert len(s.EXTRA["agnes-2.5-flash"]["pool"].keys) > 0, "không có key agnes"
           try:
               s.t_read_file("../x"); raise SystemExit("sandbox FAIL")
           except s.Denied:
