@@ -140,6 +140,9 @@ jobs:
           STATS_LOCK = threading.Lock()
 
 
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 XAgent/1.0"
+
+
           def api_request(path, payload=None, method="POST"):
               """Gọi API, tự đổi key khi 401/402/403/429/5xx."""
               if not POOL.keys:
@@ -148,17 +151,23 @@ jobs:
               for _ in range(len(POOL.keys) * 2 + 1):
                   key = POOL.get()
                   if key is None:
-                      raise RuntimeError("Tất cả key đều hết hạn mức/lỗi: " + last)
+                      why = "; ".join(f"{k['key']} {k['state']}" for k in POOL.status())
+                      raise RuntimeError("Tất cả key đều hết hạn mức/lỗi: " + (why if last == "unknown" else last))
                   data = json.dumps(payload).encode() if payload is not None else None
                   req = urllib.request.Request(CFG["base_url"].rstrip("/") + path, data=data, method=method,
                                                headers={"Authorization": "Bearer " + key,
-                                                        "Content-Type": "application/json"})
+                                                        "Content-Type": "application/json",
+                                                        "Accept": "application/json",
+                                                        # Cloudflare chặn User-Agent mặc định của urllib (lỗi 1010)
+                                                        "User-Agent": UA})
                   try:
                       with urllib.request.urlopen(req, timeout=300) as r:
                           return json.loads(r.read().decode())
                   except urllib.error.HTTPError as e:
                       body = e.read().decode(errors="replace")[:300]
                       last = f"HTTP {e.code} {body}"
+                      if "1010" in body or "cloudflare" in body.lower():
+                          raise RuntimeError("Cloudflare chặn request (error 1010), không phải lỗi key: " + body[:120])
                       if e.code in (401, 402, 403):
                           POOL.mark(key, True, f"HTTP {e.code}")
                       elif e.code == 429 or e.code >= 500:
