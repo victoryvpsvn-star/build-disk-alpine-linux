@@ -37,14 +37,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ inputs.python_version || '3.11' }}
-          cache: pip
-
-      # ═══════════════════════════════════════════════════════════
-      # GHI TOÀN BỘ SOURCE
-      # ═══════════════════════════════════════════════════════════
+      # ═══════════════════════════════════════════════════════════════
+      # BƯỚC 1: GHI TOÀN BỘ SOURCE (bash thuần, chưa cần Python)
+      # ═══════════════════════════════════════════════════════════════
       - name: Write all source files
         shell: bash
         run: |
@@ -462,7 +457,7 @@ jobs:
           EOF_CORE
 
           cat > rpc.py <<'EOF_RPC'
-          """Discord Rich Presence qua IPC local (win: named pipe, unix: socket)."""
+          """Discord Rich Presence qua IPC local."""
           from __future__ import annotations
 
           import json
@@ -473,7 +468,6 @@ jobs:
           import threading
           import time
           import uuid
-          from typing import Any, Callable, Optional
 
           OP_HANDSHAKE, OP_FRAME, OP_CLOSE, OP_PING, OP_PONG = 0, 1, 2, 3, 4
           IS_WIN = sys.platform == "win32"
@@ -723,7 +717,6 @@ jobs:
           import json
           import time
           import webbrowser
-          from pathlib import Path
 
           from aiohttp import web
 
@@ -789,8 +782,6 @@ jobs:
           .mut{color:var(--mut);font-size:12px}
           .bar{height:6px;background:#252a34;border-radius:99px;overflow:hidden;margin-top:6px}
           .bar i{display:block;height:100%;background:linear-gradient(90deg,#5865f2,#8b5cf6)}
-          .tag{font-size:11px;padding:2px 8px;border-radius:99px;background:var(--card2);
-               border:1px solid var(--bd);color:var(--mut)}
           </style>
           <header>
             <div class="logo">V</div>
@@ -811,24 +802,21 @@ jobs:
             <section id="tab-config" class="hide"></section>
           </main>
           <script>
-          const T=(k,el)=>{const e=document.querySelector('[data-tk="'+k+'"]');
-            document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.k===k));
+          const T=(k)=>{document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.k===k));
             ['dash','feat','backup','quest','logs','console','config'].forEach(x=>
               document.getElementById('tab-'+x).classList.toggle('hide',x!==k));};
           const NAV=[['dash','Tong quan'],['feat','Tinh nang'],['backup','Backup'],
                      ['quest','Quest'],['logs','Log'],['console','Console'],['config','Config']];
           document.getElementById('nav').innerHTML=NAV.map(([k,t])=>
-            '<button data-k="'+k+'" data-tk="'+k+'">'+t+'</button>').join('');
+            '<button data-k="'+k+'">'+t+'</button>').join('');
           document.getElementById('nav').onclick=e=>{if(e.target.dataset.k)T(e.target.dataset.k);};
-          document.querySelector('[data-tk="dash"]').classList.add('on');
-          const api=async(p,opt)=>{const r=await fetch('/api'+p,Object.assign({headers:{'X-Token':TOKEN}},opt||{}));
-            return r.json();};
-          const post=(p,b)=>api(p,{method:'POST',headers:{'X-Token':TOKEN,'Content-Type':'application/json'},
-            body:JSON.stringify(b||{})});
+          document.querySelector('[data-k="dash"]').classList.add('on');
+          const TOKEN=location.hash.slice(1)||'';
+          const api=async(p,opt)=>{const r=await fetch('/api'+p,Object.assign({headers:{'X-Token':TOKEN}},opt||{}));return r.json();};
+          const post=(p,b)=>api(p,{method:'POST',headers:{'X-Token':TOKEN,'Content-Type':'application/json'},body:JSON.stringify(b||{})});
           </script>
-          <script>const TOKEN=location.hash.slice(1)||'';</script>
           <script>
-          let SCHEMA=[],CFG={},ST={};
+          let CFG={},ST={};
           const TOGGLES=[
             ['quests.enabled','Auto Quest (nhan quest + cay)'],
             ['quests.auto_claim','Tu dong claim reward'],
@@ -845,52 +833,45 @@ jobs:
             ['premium.logger.ghostping','Bat ghost ping'],
             ['premium.autoreact.enabled','Auto react theo tu khoa'],
             ['premium.autofriend','Tu dong accept friend request'],
-            ['premium.nickauto.enabled','Tu dong doi nickname'],
             ['voice.stay','Voice 24/7'],
             ['backup.auto','Auto backup'],
             ['ghost','Ghost mode (invisible)'],
             ['debug','Debug log']
           ];
+          const dig=(o,p)=>p.split('.').reduce((a,k)=>(a==null?undefined:a[k]),o);
+          const card=(t,v)=>'<div class="card"><h3>'+t+'</h3><div class="big">'+v+'</div></div>';
           async function loadStatus(){
             ST=await api('/status');
             document.getElementById('who').textContent=ST.user||'chua dang nhap';
             const ps=document.getElementById('pstate');
             ps.textContent=ST.ready?'online':'offline'; ps.className='pill '+(ST.ready?'ok':'err');
             document.getElementById('pup').textContent=ST.uptime||'0s';
-            document.getElementById('tab-dash').innerHTML=
-              '<div class="grid">'+
+            document.getElementById('tab-dash').innerHTML='<div class="grid">'+
               card('Guilds',ST.guilds)+card('Friends',ST.friends)+
               card('Tin nhan da luu',ST.messages)+card('Backup',ST.backups)+
               card('API calls',ST.calls)+card('Bi 429',ST.limited)+
-              card('Quest dang cho',ST.quests)+card('RPC',ST.rpc?'ON':'OFF')+
-              '</div>'+
+              card('Quest dang cho',ST.quests)+card('RPC',ST.rpc?'ON':'OFF')+'</div>'+
               '<div class="card" style="margin-top:14px"><h3>Nhanh</h3><div class="flex">'+
               '<button class="b" onclick="act(\'backup\')">Backup ngay</button>'+
               '<button class="b ghost" onclick="act(\'quest\')">Chay quest</button>'+
               '<button class="b ghost" onclick="act(\'export\')">Export HTML</button>'+
-              '<button class="b ghost" onclick="act(\'prune\')">Don backup cu</button>'+
-              '</div></div>';
+              '<button class="b ghost" onclick="act(\'prune\')">Don backup cu</button></div></div>';
           }
-          const card=(t,v)=>'<div class="card"><h3>'+t+'</h3><div class="big">'+v+'</div></div>';
           async function loadFeatures(){
             CFG=await api('/config');
             document.getElementById('tab-feat').innerHTML='<div class="card"><h3>Bat / tat</h3>'+
-              TOGGLES.map(([p,label])=>{
-                const v=!!dig(CFG,p);
-                return '<div class="row"><div>'+label+'<div class="mut">'+p+'</div></div>'+
-                  '<div class="sw '+(v?'on':'')+'" onclick="tog(this,\''+p+'\')"></div></div>';
-              }).join('')+'</div>'+
+              TOGGLES.map(([p,label])=>'<div class="row"><div>'+label+
+                '<div class="mut">'+p+'</div></div><div class="sw '+(dig(CFG,p)?'on':'')+
+                '" onclick="tog(this,\''+p+'\')"></div></div>').join('')+'</div>'+
               '<div class="card" style="margin-top:14px"><h3>Chuoi / so</h3>'+
               ['prefix','quests.video_speed','quests.video_step','giveaway.delay_min',
                'giveaway.delay_max','massops.friend_delay','massops.dm_delay',
                'premium.rpc.client_id','premium.rpc.rotate_seconds',
                'premium.translate.to','premium.logger.webhook']
               .map(p=>'<div class="row"><div class="mut">'+p+'</div>'+
-                '<input style="max-width:340px" value="'+(dig(CFG,p)??'')+'" '+
-                'onchange="setv(\''+p+'\',this.value)"></div>').join('')+
-              '</div>';
+                '<input style="max-width:340px" value="'+(dig(CFG,p)??'')+
+                '" onchange="setv(\''+p+'\',this.value)"></div>').join('')+'</div>';
           }
-          const dig=(o,p)=>p.split('.').reduce((a,k)=>(a==null?undefined:a[k]),o);
           async function tog(el,p){const nv=!el.classList.contains('on');
             el.classList.toggle('on',nv); await post('/config',{path:p,value:nv}); CFG=await api('/config');}
           async function setv(p,v){let val=v; if(v!==''&&!isNaN(v))val=Number(v);
@@ -909,52 +890,48 @@ jobs:
               b.map(x=>'<tr><td>'+x.name+'</td><td>'+x.size+'</td><td>'+
                 Object.entries(x.counts||{}).map(([k,v])=>k+':'+v).join(' ')+
                 '</td><td><button class="b ghost" onclick="post(\'/backup/export\',{name:\''+x.name+'\'}).then(()=>toast(\'dang export\'))">Export</button> '+
-                '<button class="b red" onclick="post(\'/backup/delete\',{name:\''+x.name+'\'}).then(loadBackups)">Xoa</button>'+
-                '</td></tr>').join('')+'</table></div>';
+                '<button class="b red" onclick="post(\'/backup/delete\',{name:\''+x.name+'\'}).then(loadBackups)">Xoa</button></td></tr>').join('')+
+              '</table></div>';
           }
           async function loadQuests(){
             const q=await api('/quests');
             document.getElementById('tab-quest').innerHTML='<div class="card"><h3>Quest</h3>'+
-              (q.length?q.map(x=>'<div class="row"><div>'+x.name+'<div class="mut">'+x.task+'</div></div>'+
-                '<div style="text-align:right"><div>'+x.value+'/'+x.target+'</div>'+
-                '<div class="bar"><i style="width:'+(x.target?Math.min(100,x.value*100/x.target):0)+'%"></i></div></div></div>').join('')
-                :'<div class="mut">khong co quest</div>')+'</div>';
+              (q.length?q.map(x=>'<div class="row"><div>'+x.name+'<div class="mut">'+x.task+
+                '</div></div><div style="text-align:right"><div>'+x.value+'/'+x.target+
+                '</div><div class="bar"><i style="width:'+(x.target?Math.min(100,x.value*100/x.target):0)+
+                '%"></i></div></div></div>').join(''):'<div class="mut">khong co quest</div>')+'</div>';
           }
           async function loadLogs(){
             const l=await api('/logs');
-            const el=document.getElementById('tab-logs');
-            const atBottom=el.scrollTop+el.clientHeight>=el.scrollHeight-40;
-            el.innerHTML='<div class="card"><h3>Log</h3><pre id="logbox">'+l.text.replace(/</g,'&lt;')+'</pre></div>';
-            if(atBottom)el.scrollIntoView({block:'end'});
+            document.getElementById('tab-logs').innerHTML=
+              '<div class="card"><h3>Log</h3><pre>'+l.text.replace(/</g,'&lt;')+'</pre></div>';
           }
           async function loadConsole(){
             const c=await api('/channels');
             document.getElementById('tab-console').innerHTML=
               '<div class="card"><h3>Console</h3><div class="flex" style="margin-bottom:10px">'+
-              '<select id="cch" style="max-width:420px">'+c.map(x=>'<option value="'+x.id+'">'+x.label+'</option>').join('')+'</select>'+
-              '<button class="b" onclick="runCmd()">Chay</button></div>'+
-              '<div class="mut">Lenh chay nhu ban tu go trong Discord (da tu them prefix)</div>'+
-              '<pre id="cout" style="margin-top:12px">san sang</pre></div>';
+              '<select id="cch" style="max-width:420px">'+c.map(x=>'<option value="'+x.id+'">'+x.label+'</option>').join('')+
+              '</select><button class="b" onclick="runCmd()">Chay</button></div>'+
+              '<input id="cin" placeholder="go lenh, vd: quests" style="margin-bottom:10px">'+
+              '<pre id="cout">san sang</pre></div>';
           }
           async function runCmd(){
-            const ch=document.getElementById('cch').value;
-            const t=document.getElementById('cin').value;
+            const ch=document.getElementById('cch').value, t=document.getElementById('cin').value;
             const r=await post('/console',{channel_id:ch,text:t});
-            document.getElementById('cout').textContent+= '\n> '+t+'\n'+(r.msg||'');
+            document.getElementById('cout').textContent+='\n> '+t+'\n'+(r.msg||'');
             document.getElementById('cin').value='';
           }
           async function loadConfig(){
             const raw=await api('/config?raw=1');
             document.getElementById('tab-config').innerHTML=
-              '<div class="card"><h3>config.json</h3>'+
-              '<textarea id="cfgbox">'+raw.text+'</textarea>'+
-              '<div class="flex" style="margin-top:10px">'+
+              '<div class="card"><h3>config.json</h3><textarea id="cfgbox">'+raw.text+
+              '</textarea><div class="flex" style="margin-top:10px">'+
               '<button class="b" onclick="saveCfg()">Luu</button>'+
               '<button class="b ghost" onclick="loadConfig()">Tai lai</button></div></div>';
           }
           async function saveCfg(){
-            const t=document.getElementById('cfgbox').value;
-            const r=await post('/config/save',{text:t}); toast(r.msg||'da luu');
+            const r=await post('/config/save',{text:document.getElementById('cfgbox').value});
+            toast(r.msg||'da luu');
           }
           T('dash');
           loadStatus(); loadFeatures(); loadBackups(); loadQuests(); loadLogs();
@@ -972,27 +949,28 @@ jobs:
                   self.runner = None
                   self.site = None
 
-              # ── auth ──
               @web.middleware
               async def _auth(self, request, handler):
-                  if request.path == "/" or request.path.startswith("/static"):
+                  if request.path == "/":
                       return await handler(request)
                   if request.headers.get("X-Token") != self.token:
                       return web.json_response({"error": "bad token"}, status=401)
                   return await handler(request)
 
-              # ── routes ──
               async def _index(self, request):
-                  html = HTML.replace("const TOKEN=location.hash.slice(1)||'';",
-                                      "const TOKEN='%s';" % self.token)
-                  return web.Response(text=html, content_type="text/html")
+                  return web.Response(
+                      text=HTML.replace("const TOKEN=location.hash.slice(1)||'';",
+                                        "const TOKEN='%s';" % self.token),
+                      content_type="text/html")
 
               async def _status(self, request):
                   b = self.bot
                   try:
-                      quests = await b.get_cog("Quests").fetch() if b.get_cog("Quests") else []
+                      cog = b.get_cog("Quests")
+                      quests = await cog.fetch() if cog else []
                   except Exception:
                       quests = []
+                  prem = b.get_cog("Premium")
                   return web.json_response({
                       "user": str(b.user) if b.user else None,
                       "ready": b.is_ready(),
@@ -1005,18 +983,13 @@ jobs:
                       "limited": b.httpx.limited,
                       "uptime": core.fmt_dur(time.time() - getattr(b, "boot", time.time())),
                       "quests": len(quests),
-                      "rpc": bool(b.get_cog("Premium") and b.get_cog("Premium").rpc
-                                  and b.get_cog("Premium").rpc.connected),
-                  })
+                      "rpc": bool(prem and prem.rpc and prem.rpc.connected)})
 
               async def _config(self, request):
                   if request.query.get("raw"):
-                      return web.json_response({
-                          "text": core.CONFIG_PATH.read_text(encoding="utf-8")})
-                  data = json.loads(json.dumps(core._cfg))
-                  if data.get("token"):
-                      data["token_masked"] = data["token"][:8] + "..."
-                  return web.json_response(data)
+                      return web.json_response(
+                          {"text": core.CONFIG_PATH.read_text(encoding="utf-8")})
+                  return web.json_response(json.loads(json.dumps(core._cfg)))
 
               async def _config_set(self, request):
                   body = await request.json()
@@ -1039,12 +1012,11 @@ jobs:
 
               async def _logs(self, request):
                   p = core.LOG_DIR / "selfbot.log"
-                  n = int(request.query.get("n", 400))
                   if not p.exists():
                       return web.json_response({"text": "(chua co log)"})
                   try:
                       with open(p, "r", encoding="utf-8", errors="replace") as f:
-                          lines = f.readlines()[-n:]
+                          lines = f.readlines()[-400:]
                   except Exception:
                       lines = []
                   return web.json_response({"text": "".join(lines)})
@@ -1058,17 +1030,13 @@ jobs:
 
               async def _backup_export(self, request):
                   body = await request.json()
-                  name = body.get("name")
-                  fmt = body.get("fmt", "html")
-                  s = self.bot.backups.open(name) if name else self.bot.backups.latest()
-                  ex = self.bot.backups.exporter(s)
-                  if fmt == "json":
-                      ex.export_all_json(pretty=True)
-                  else:
-                      ex.export_all_html()
-                  return web.json_response({"msg": "da export vao data/backups/%s/export/" % s.name})
+                  s = (self.bot.backups.open(body["name"]) if body.get("name")
+                       else self.bot.backups.latest())
+                  self.bot.backups.exporter(s).export_all_html()
+                  return web.json_response({"msg": "da export"})
 
               async def _quests(self, request):
+                  import cogs.quests as qm
                   cog = self.bot.get_cog("Quests")
                   if not cog:
                       return web.json_response([])
@@ -1076,15 +1044,14 @@ jobs:
                   for q in await cog.fetch():
                       c = q.get("config") or {}
                       u = q.get("user_status") or {}
-                      task, tcfg = cog.__class__.__module__ and (None, None)
-                      import cogs.quests as qm
-                      task, tcfg = qm.parse_task(c)
-                      tgt = qm.target_of(tcfg)
-                      val = int(((u.get("progress") or {}).get(task or "") or {}).get("value", 0) or 0)
+                      task, tc = qm.parse_task(c)
                       out.append({"name": ((c.get("messages") or {}).get("quest_name")
                                            or (c.get("application") or {}).get("name")
                                            or q.get("id")),
-                                  "task": task, "value": val, "target": tgt,
+                                  "task": task,
+                                  "value": int(((u.get("progress") or {}).get(task or "") or {})
+                                               .get("value", 0) or 0),
+                                  "target": qm.target_of(tc),
                                   "done": bool(u.get("completed_at"))})
                   return web.json_response(out)
 
@@ -1100,18 +1067,17 @@ jobs:
                   text = body["text"].strip()
                   if not text.startswith(core.prefix()):
                       text = core.prefix() + text
-                  st, _ = await self.bot.httpx.post("/channels/%s/messages" % body["channel_id"],
-                                                    {"content": text})
+                  st, _ = await self.bot.httpx.post(
+                      "/channels/%s/messages" % body["channel_id"], {"content": text})
                   return web.json_response({"msg": "status %s" % st})
 
               async def _action(self, request):
-                  body = await request.json()
-                  a = body.get("action")
+                  a = (await request.json()).get("action")
                   if a == "backup":
                       asyncio.create_task(self.bot.backups.create(label="ui"))
                       return web.json_response({"msg": "dang backup..."})
                   if a == "prune":
-                      return web.json_response({"msg": "da xoa %d backup cu"
+                      return web.json_response({"msg": "xoa %d backup cu"
                                                        % self.bot.backups.prune()})
                   if a == "quest":
                       cog = self.bot.get_cog("Quests")
@@ -1124,8 +1090,7 @@ jobs:
                       return web.json_response({"msg": "da export HTML"})
                   return web.json_response({"msg": "?"})
 
-              # ── lifecycle ──
-              def build(self) -> web.Application:
+              def build(self):
                   app = web.Application(middlewares=[self._auth])
                   r = app.router
                   r.add_get("/", self._index)
@@ -1146,8 +1111,7 @@ jobs:
               async def start(self):
                   if not cfg("ui.enabled", True):
                       return None
-                  app = self.build()
-                  self.runner = web.AppRunner(app, access_log=None)
+                  self.runner = web.AppRunner(self.build(), access_log=None)
                   await self.runner.setup()
                   port = self.port
                   for _ in range(12):
@@ -1179,8 +1143,6 @@ jobs:
           import json
           import os
           import shutil
-          from pathlib import Path
-          from typing import Any, Iterable, Iterator
 
           from core import BACKUP_DIR, human_size, now_iso
 
@@ -1414,9 +1376,7 @@ jobs:
 
                   await note("notes")
                   notes = await self._get("/users/@me/notes")
-                  if not isinstance(notes, dict):
-                      notes = {}
-                  out["notes"] = {k: v for k, v in notes.items() if v}
+                  out["notes"] = {k: v for k, v in (notes or {}).items() if v}
 
                   for key, path in (("connections", "/users/@me/connections"),
                                     ("authorized_apps", "/users/@me/authorized-applications"),
@@ -1493,7 +1453,8 @@ jobs:
                               "custom_status", "timezone_offset", "developer_mode"]
                       sub = {k: acc["settings"][k] for k in keys if k in acc["settings"]}
                       if sub:
-                          await do("settings", lambda: self.h.patch("/users/@me/settings", sub))
+                          await do("settings",
+                                   lambda: self.h.patch("/users/@me/settings", sub))
 
                   if "friends" in parts:
                       await note("friends")
@@ -1702,7 +1663,8 @@ jobs:
                       await asyncio.sleep(3)
 
                   role_map = {}
-                  for r in sorted([x for x in data.get("roles", []) if x["name"] != "@everyone"],
+                  for r in sorted([x for x in data.get("roles", [])
+                                   if x["name"] != "@everyone"],
                                   key=lambda x: x.get("position", 0)):
                       if dry_run:
                           role_map[r["id"]] = "D" + r["id"]
@@ -1735,8 +1697,8 @@ jobs:
                                                             role_map),
                           "topic": c.get("topic"), "nsfw": c.get("nsfw"),
                           "rate_limit_per_user": c.get("rate_limit_per_user", 0),
-                          "bitrate": c.get("bitrate"), "user_limit": c.get("user_limit")}
-                          .items() if v is not None}
+                          "bitrate": c.get("bitrate"),
+                          "user_limit": c.get("user_limit")}.items() if v is not None}
                       st, new = await self.h.post("/guilds/%s/channels" % target, body)
                       if st in (200, 201):
                           chan_map[c["id"]] = new["id"]
@@ -1775,7 +1737,7 @@ jobs:
           import json
           import re
 
-          from core import cfg, jitter, log, now_iso
+          from core import cfg, jitter, now_iso
           from .storage import BackupStore
 
           BAD = re.compile(r"[^\w.\-]+")
@@ -1790,7 +1752,8 @@ jobs:
               return {"id": m.get("id"), "timestamp": m.get("timestamp"),
                       "edited_timestamp": m.get("edited_timestamp"),
                       "author": {k: a.get(k) for k in
-                                 ("id", "username", "global_name", "avatar")} | {"bot": a.get("bot", False)},
+                                 ("id", "username", "global_name", "avatar")}
+                                | {"bot": a.get("bot", False)},
                       "content": m.get("content"), "type": m.get("type"),
                       "pinned": m.get("pinned"),
                       "reference_id": (m.get("referenced_message") or {}).get("id")
@@ -1800,7 +1763,8 @@ jobs:
                                        ("url", "filename", "size", "content_type",
                                         "width", "height")}
                                       for x in (m.get("attachments") or [])],
-                      "embeds": [{"title": e.get("title"), "description": e.get("description"),
+                      "embeds": [{"title": e.get("title"),
+                                  "description": e.get("description"),
                                   "url": e.get("url"),
                                   "image": (e.get("image") or {}).get("url")}
                                  for e in (m.get("embeds") or [])],
@@ -1829,8 +1793,8 @@ jobs:
                   self.s.write_json("messages/_progress.json", self.progress)
 
               def _meta(self, rel, label="", guild_id=None):
-                  return {"channel_id": rel.rsplit("/", 1)[-1], "channel_name": label or None,
-                          "guild_id": guild_id,
+                  return {"channel_id": rel.rsplit("/", 1)[-1],
+                          "channel_name": label or None, "guild_id": guild_id,
                           "kind": "dm" if "/dms/" in rel + "/" else "guild",
                           "exported_at": now_iso()}
 
@@ -1959,14 +1923,14 @@ jobs:
                   st, chans = await self.h.get("/guilds/%s/channels" % gid)
                   if st != 200:
                       return 0
-                  todo = [c for c in chans if c.get("type") in (0, 5, 15, 2)
-                          or (c.get("type") == 2 and cfg("backup.messages.include_voice_text"))]
+                  todo = [c for c in chans if c.get("type") in (0, 5, 15, 2)]
                   total = 0
                   for c in todo:
                       try:
                           n = await self.archive_channel(
                               int(c["id"]), scope="guilds/" + gid, label=c.get("name", ""),
-                              guild_id=gid, limit=int(cfg("backup.messages.limit_per_channel", 0)),
+                              guild_id=gid,
+                              limit=int(cfg("backup.messages.limit_per_channel", 0)),
                               after=cfg("backup.messages.after"),
                               download_media=cfg("backup.messages.download_media", False),
                               fmt=fmt)
@@ -2014,7 +1978,7 @@ jobs:
           import html
           import json
 
-          from core import cfg, human_size, now_iso
+          from core import now_iso
           from .storage import BackupStore
 
           HEAD = """<!doctype html><meta charset="utf-8"><title>{t}</title>
@@ -2302,7 +2266,6 @@ jobs:
           import json
           from datetime import datetime, timezone
 
-          import discord
           from discord.ext import commands, tasks
 
           import core
@@ -2395,7 +2358,8 @@ jobs:
                   exp = conf.get("expires_at")
                   if exp:
                       try:
-                          if datetime.fromisoformat(exp.replace("Z", "+00:00")) < datetime.now(timezone.utc):
+                          if datetime.fromisoformat(exp.replace("Z", "+00:00")) \
+                                  < datetime.now(timezone.utc):
                               return
                       except Exception:
                           pass
@@ -2418,7 +2382,7 @@ jobs:
                   elif up in DESKTOP and not (tgt and prog >= tgt):
                       await self.run_desktop(qid, tgt or 900)
                   elif up in ACTIVITY:
-                      app = ((conf.get("application") or {}).get("id"))
+                      app = (conf.get("application") or {}).get("id")
                       iv = core.cfg("quests.heartbeat_interval", 20)
                       e = 0
                       while e < (tgt or 900):
@@ -2474,7 +2438,8 @@ jobs:
                       name = ((c.get("messages") or {}).get("quest_name")
                               or (c.get("application") or {}).get("name") or q.get("id"))
                       task, tc = parse_task(c)
-                      val = int(((u.get("progress") or {}).get(task or "") or {}).get("value", 0) or 0)
+                      val = int(((u.get("progress") or {}).get(task or "") or {})
+                                .get("value", 0) or 0)
                       lines.append("[%s] %s | %s %s/%s"
                                    % ("OK" if u.get("completed_at") else "..",
                                       name, task, val, target_of(tc)))
@@ -2536,8 +2501,9 @@ jobs:
                               await self.redeem(g.group(1), m.channel.id)
                   if core.cfg("giveaway.enabled", True):
                       await self.giveaway(m)
-                  if core.cfg("afk.enabled") and (self.bot.user in m.mentions
-                                                  or "<@%s>" % self.bot.user.id in (m.content or "")):
+                  if core.cfg("afk.enabled") and (
+                          self.bot.user in m.mentions
+                          or "<@%s>" % self.bot.user.id in (m.content or "")):
                       if m.channel.id not in self.afk_done:
                           self.afk_done.add(m.channel.id)
                           await core.jsleep()
@@ -2548,7 +2514,8 @@ jobs:
                               pass
                   if core.cfg("autoresponder.enabled", True):
                       await self.autorespond(m)
-                  if core.cfg("bump.enabled", True) and m.author.id in core.cfg("bump.bot_ids", []):
+                  if core.cfg("bump.enabled", True) \
+                          and m.author.id in core.cfg("bump.bot_ids", []):
                       if "bump" in ((m.content or "") + " ".join(
                               "%s %s" % (e.title or "", e.description or "")
                               for e in m.embeds)).lower():
@@ -2569,7 +2536,8 @@ jobs:
 
               async def redeem(self, code, cid):
                   st, d = await self.h.post("/entitlements/gift-codes/%s/redeem" % code,
-                                            {"channel_id": str(cid), "payment_source_id": None})
+                                            {"channel_id": str(cid),
+                                             "payment_source_id": None})
                   if st == 200:
                       return log.info("NITRO SNIPED %s", code)
                   msg = ((d or {}).get("message") or "").lower() if isinstance(d, dict) else ""
@@ -2603,7 +2571,8 @@ jobs:
                           pass
 
               async def autorespond(self, m):
-                  if time.time() - self.cd.get(m.author.id, 0) < core.cfg("autoresponder.cooldown", 25):
+                  if time.time() - self.cd.get(m.author.id, 0) \
+                          < core.cfg("autoresponder.cooldown", 25):
                       return
                   txt = (m.content or "").lower()
                   for r in core.cfg("autoresponder.rules", []):
@@ -2639,7 +2608,8 @@ jobs:
 
               @tasks.loop(seconds=300)
               async def presence_loop(self):
-                  if not core.cfg("presence.enabled", True) or core.cfg("premium.rpc.enabled"):
+                  if not core.cfg("presence.enabled", True) \
+                          or core.cfg("premium.rpc.enabled"):
                       return
                   acts = core.cfg("presence.activities", [])
                   if not acts:
@@ -2678,7 +2648,8 @@ jobs:
                   if not c:
                       return await ctx.send("khong co")
                   d = c[-1]
-                  await ctx.send("**%s**\ncu: %s\nmoi: %s" % (d["author"], d["before"], d["after"]))
+                  await ctx.send("**%s**\ncu: %s\nmoi: %s"
+                                 % (d["author"], d["before"], d["after"]))
 
               @commands.command(name="afk")
               async def afk(self, ctx, *, reason="AFK"):
@@ -2734,7 +2705,6 @@ jobs:
                   if self.rpc:
                       self.rpc.close()
 
-              # ── RPC ──
               def _on(self):
                   return bool(cfg("premium.rpc.enabled")) and bool(cfg("premium.rpc.client_id"))
 
@@ -2768,8 +2738,8 @@ jobs:
                   a = dict(acts[int(time.time() // iv) % len(acts)])
                   if a.pop("timestamp", False):
                       a.setdefault("start", time.time())
-                  act = rpcmod.build_activity(**a)
-                  await self.bot.loop.run_in_executor(None, self._push, act)
+                  await self.bot.loop.run_in_executor(None, self._push,
+                                                      rpcmod.build_activity(**a))
 
               @rpc_loop.before_loop
               async def _brl(self):
@@ -2781,8 +2751,8 @@ jobs:
                   await ctx.send(
                       "**CUSTOM RPC** `%s`\n`%srpc clientid <app_id>` · `%srpc on|off`\n"
                       "`%srpc set details|state|large|small <v>` · `%srpc button L | url`\n"
-                      "`%srpc template coding|quest|gaming|streaming` · `%srpc push` · `%srpc off`"
-                      % ("ON" if self._on() else "OFF", p, p, p, p, p))
+                      "`%srpc template coding|quest|gaming|streaming` · `%srpc push`"
+                      % ("ON" if self._on() else "OFF", p, p, p, p))
 
               @rpc.command(name="on")
               async def rpc_on(self, ctx):
@@ -2853,7 +2823,6 @@ jobs:
                   await ctx.send("```json\n%s\n```" % core.truncate(json.dumps(
                       cfg("premium.rpc.activities", []), ensure_ascii=False, indent=1), 1700))
 
-              # ── spotify ──
               @commands.command(name="spotify")
               async def spotify(self, ctx, *, raw: str = ""):
                   if not raw:
@@ -2864,9 +2833,9 @@ jobs:
                       details=artist.strip() or None, state="Venice"))
                   await ctx.send("spotify: " + raw)
 
-              # ── typing ──
               @commands.command(name="typing", aliases=["type"])
-              async def typing(self, ctx, channel: discord.TextChannel = None, seconds: int = 15):
+              async def typing(self, ctx, channel: discord.TextChannel = None,
+                               seconds: int = 15):
                   ch = channel or ctx.channel
                   end = time.time() + max(3, min(seconds, 300))
                   while time.time() < end:
@@ -2877,7 +2846,6 @@ jobs:
                           break
                   await ctx.send("xong")
 
-              # ── translate ──
               @commands.command(name="tr", aliases=["translate"])
               async def tr(self, ctx, to: str = "", *, text: str = ""):
                   if not text and ctx.message.reference:
@@ -2900,7 +2868,6 @@ jobs:
                       out = "loi: %s" % e
                   await ctx.send("**[%s]** %s" % (tgt, out))
 
-              # ── steal emoji ──
               @commands.command(name="steal", aliases=["addemoji"])
               async def steal(self, ctx):
                   content = ctx.message.content or ""
@@ -2918,9 +2885,11 @@ jobs:
                       ext = "gif" if "<a:" in content else "png"
                       try:
                           async with self.h.session.get(
-                                  "https://cdn.discordapp.com/emojis/%s.%s" % (eid, ext)) as r:
+                                  "https://cdn.discordapp.com/emojis/%s.%s"
+                                  % (eid, ext)) as r:
                               raw = await r.read()
-                          uri = "data:image/%s;base64,%s" % (ext, base64.b64encode(raw).decode())
+                          uri = "data:image/%s;base64,%s" % (ext,
+                                                             base64.b64encode(raw).decode())
                           st, _ = await self.h.post("/guilds/%d/emojis" % ctx.guild.id,
                                                     {"name": name, "image": uri})
                           if st in (200, 201):
@@ -2930,7 +2899,6 @@ jobs:
                           pass
                   await ctx.send("da them: %s" % (", ".join(added) or "khong"))
 
-              # ── info ──
               @commands.command(name="userinfo", aliases=["ui"])
               async def ui(self, ctx, user: discord.User = None):
                   u = user or (ctx.message.mentions[0] if ctx.message.mentions else None)
@@ -2944,13 +2912,12 @@ jobs:
                   u = user or (ctx.message.mentions[0] if ctx.message.mentions else ctx.author)
                   await ctx.send(u.display_avatar.with_size(1024).url)
 
-              # ── logger ──
               def _wlog(self, kind, m):
                   try:
                       with open(self.log_path, "a", encoding="utf-8") as f:
                           f.write(json.dumps({"kind": kind, "at": core.now_iso(),
-                                              "guild": getattr(getattr(m, "guild", None), "id", None),
-                                              "channel": m.channel.id, "author": str(m.author),
+                                              "channel": m.channel.id,
+                                              "author": str(m.author),
                                               "content": m.content,
                                               "attachments": [a.url for a in m.attachments]},
                                              ensure_ascii=False) + "\n")
@@ -2993,7 +2960,8 @@ jobs:
                   if not c:
                       return await ctx.send("khong co")
                   await ctx.send(core.truncate("\n".join(
-                      "**%s**: %s" % (g["author"], g["content"][:150]) for g in list(c)[-10:])))
+                      "**%s**: %s" % (g["author"], g["content"][:150])
+                      for g in list(c)[-10:])))
 
               @commands.command(name="logger")
               async def logger(self, ctx, key: str = "", value: str = ""):
@@ -3010,10 +2978,10 @@ jobs:
                                     cfg("premium.logger.ghostping"),
                                     bool(cfg("premium.logger.webhook"))))
 
-              # ── autoreact ──
               @commands.Cog.listener()
               async def on_message(self, m):
-                  if not cfg("premium.autoreact.enabled") or m.author.id == self.bot.user.id:
+                  if not cfg("premium.autoreact.enabled") \
+                          or m.author.id == self.bot.user.id:
                       return
                   txt = (m.content or "").lower()
                   for r in cfg("premium.autoreact.rules", []):
@@ -3039,7 +3007,6 @@ jobs:
                       core.cfg_set("premium.autoreact.rules", [])
                       return await ctx.send("xoa het")
 
-              # ── scheduler ──
               @tasks.loop(seconds=30)
               async def sched_loop(self):
                   now = time.time()
@@ -3074,8 +3041,9 @@ jobs:
               @sched.command(name="add")
               async def sched_add(self, ctx, minutes: int, *, text: str):
                   jobs = cfg("premium.scheduler.jobs", [])
-                  jobs.append({"channel_id": ctx.channel.id, "interval": max(60, minutes * 60),
-                               "text": text, "next": time.time() + minutes * 60})
+                  jobs.append({"channel_id": ctx.channel.id,
+                               "interval": max(60, minutes * 60), "text": text,
+                               "next": time.time() + minutes * 60})
                   core.cfg_set("premium.scheduler.jobs", jobs)
                   await ctx.send("them job")
 
@@ -3084,7 +3052,6 @@ jobs:
                   core.cfg_set("premium.scheduler.jobs", [])
                   await ctx.send("xoa het job")
 
-              # ── autofriend ──
               @tasks.loop(seconds=90)
               async def friend_loop(self):
                   if not cfg("premium.autofriend"):
@@ -3103,7 +3070,8 @@ jobs:
               @commands.command(name="autofriend")
               async def autofriend(self, ctx):
                   core.cfg_set("premium.autofriend", not cfg("premium.autofriend"))
-                  await ctx.send("autofriend: %s" % ("ON" if cfg("premium.autofriend") else "OFF"))
+                  await ctx.send("autofriend: %s"
+                                 % ("ON" if cfg("premium.autofriend") else "OFF"))
 
               @commands.command(name="premium", aliases=["pr"])
               async def premium(self, ctx):
@@ -3124,8 +3092,6 @@ jobs:
           """Cong cu: markread, massrole, channel tools, forward, keyword, plugin."""
           import asyncio
           import importlib
-          import sys
-          import time
 
           import discord
           from discord.ext import commands
@@ -3139,12 +3105,11 @@ jobs:
                   self.bot = bot
                   self.h = bot.httpx
 
-              # ── mark read ──
               @commands.command(name="markread", aliases=["mr"])
               async def markread(self, ctx):
-                  m = await ctx.send("dang danh dau da doc...")
-                  st, chans = await self.h.get("/users/@me/channels")
+                  m = await ctx.send("dang danh dau...")
                   n = 0
+                  st, chans = await self.h.get("/users/@me/channels")
                   for c in (chans or []):
                       if c.get("last_message_id"):
                           r, _ = await self.h.post(
@@ -3160,11 +3125,10 @@ jobs:
                       await asyncio.sleep(0.4)
                   await m.edit(content="da danh dau %d kenh" % n)
 
-              # ── mass role ──
               @commands.command(name="massrole")
               async def massrole(self, ctx, role: discord.Role, mode: str = "add"):
                   members = [m for m in ctx.guild.members if not m.bot]
-                  await ctx.send("dang %s role %s cho %d member..." % (mode, role.name, len(members)))
+                  await ctx.send("dang %s role cho %d member..." % (mode, len(members)))
                   n = 0
                   for m in members:
                       try:
@@ -3180,7 +3144,6 @@ jobs:
                       await asyncio.sleep(0.5)
                   await ctx.send("xong %d" % n)
 
-              # ── channel tools ──
               @commands.command(name="slowmode")
               async def slowmode(self, ctx, seconds: int = 0):
                   await self.h.patch("/channels/%d" % ctx.channel.id,
@@ -3189,16 +3152,18 @@ jobs:
 
               @commands.command(name="lock")
               async def lock(self, ctx):
-                  ow = {"type": 0, "id": ctx.guild.default_role.id, "deny": "2048"}
                   await self.h.put("/channels/%d/permissions/%d"
-                                   % (ctx.channel.id, ctx.guild.default_role.id), ow)
+                                   % (ctx.channel.id, ctx.guild.default_role.id),
+                                   {"type": 0, "id": ctx.guild.default_role.id,
+                                    "deny": "2048"})
                   await ctx.send("da lock")
 
               @commands.command(name="unlock")
               async def unlock(self, ctx):
-                  ow = {"type": 0, "id": ctx.guild.default_role.id, "allow": "2048"}
                   await self.h.put("/channels/%d/permissions/%d"
-                                   % (ctx.channel.id, ctx.guild.default_role.id), ow)
+                                   % (ctx.channel.id, ctx.guild.default_role.id),
+                                   {"type": 0, "id": ctx.guild.default_role.id,
+                                    "allow": "2048"})
                   await ctx.send("da unlock")
 
               @commands.command(name="topic")
@@ -3206,24 +3171,21 @@ jobs:
                   await self.h.patch("/channels/%d" % ctx.channel.id, {"topic": text})
                   await ctx.send("doi topic")
 
-              # ── server info ──
               @commands.command(name="serverinfo", aliases=["si"])
               async def si(self, ctx):
                   g = ctx.guild
                   await ctx.send("**%s**\nid: `%d`\nowner: <@%d>\nmembers: `%d`\n"
-                                 "channels: `%d`\nroles: `%d`\nboosts: `%d`\ncreated: `%s`"
+                                 "channels: `%d`\nroles: `%d`\ncreated: `%s`"
                                  % (g.name, g.id, g.owner_id, g.member_count or len(g.members),
-                                    len(g.channels), len(g.roles), g.premium_subscription_count,
+                                    len(g.channels), len(g.roles),
                                     g.created_at.strftime("%Y-%m-%d")))
 
-              # ── forward ──
               @commands.group(name="forward", invoke_without_command=True)
               async def forward(self, ctx):
                   fw = cfg("premium.forward", [])
                   if not fw:
                       return await ctx.send("`.forward add <webhook_url>`")
-                  await ctx.send("\n".join("%d. <#%s> -> %s"
-                                           % (i, f["channel_id"], f["webhook"][:50])
+                  await ctx.send("\n".join("%d. <#%s>" % (i, f["channel_id"])
                                            for i, f in enumerate(fw)))
 
               @forward.command(name="add")
@@ -3247,20 +3209,21 @@ jobs:
                           try:
                               await self.h.session.post(f["webhook"], json={
                                   "content": "**%s** trong <#%d>\n%s"
-                                             % (m.author, m.channel.id, (m.content or "")[:1500])})
+                                             % (m.author, m.channel.id,
+                                                (m.content or "")[:1500])})
                           except Exception:
                               pass
 
-              # ── keyword notifier ──
               @commands.group(name="kw", invoke_without_command=True)
               async def kw(self, ctx):
                   ks = cfg("premium.keywords", [])
-                  await ctx.send("keywords: %s" % (", ".join(k["word"] for k in ks) or "(trong)"))
+                  await ctx.send("keywords: %s"
+                                 % (", ".join(k["word"] for k in ks) or "(trong)"))
 
               @kw.command(name="add")
-              async def kw_add(self, ctx, word: str, *, webhook: str = ""):
+              async def kw_add(self, ctx, word: str):
                   ks = cfg("premium.keywords", [])
-                  ks.append({"word": word.lower(), "webhook": webhook})
+                  ks.append({"word": word.lower()})
                   core.cfg_set("premium.keywords", ks)
                   await ctx.send("theo doi: " + word)
 
@@ -3269,11 +3232,11 @@ jobs:
                   core.cfg_set("premium.keywords", [])
                   await ctx.send("xoa het")
 
-              # ── plugin loader ──
               @commands.group(name="plugin", aliases=["pl"], invoke_without_command=True)
               async def plugin(self, ctx):
-                  files = [f.stem for f in core.PLUGIN_DIR.glob("*.py") if not f.stem.startswith("_")]
-                  await ctx.send("plugins: %s\ntha file .py vao thu muc plugins/"
+                  files = [f.stem for f in core.PLUGIN_DIR.glob("*.py")
+                           if not f.stem.startswith("_")]
+                  await ctx.send("plugins: %s\ntha file .py vao plugins/"
                                  % (", ".join(files) or "(trong)"))
 
               @plugin.command(name="load")
@@ -3301,7 +3264,6 @@ jobs:
                           log.debug("plugin %s: %s", f.stem, e)
                   await ctx.send("reload: %s" % (", ".join(ok) or "khong co"))
 
-              # ── soundboard ──
               @commands.command(name="sound")
               async def sound(self, ctx, *, name: str = ""):
                   vc = ctx.guild.voice_client
@@ -3312,22 +3274,20 @@ jobs:
                   if not items:
                       return await ctx.send("server khong co soundboard")
                   pick = next((s for s in items if name.lower() in s["name"].lower()), items[0])
-                  st, _ = await self.h.post("/channels/%d/send-soundboard-sound" % vc.channel.id,
-                                            {"sound_id": pick["sound_id"]})
+                  await self.h.post("/channels/%d/send-soundboard-sound" % vc.channel.id,
+                                    {"sound_id": pick["sound_id"]})
                   await ctx.send("phat: %s" % pick["name"])
 
-              # ── account stats ──
               @commands.command(name="astats")
               async def astats(self, ctx):
                   st, u = await self.h.get("/users/@me")
                   st2, gs = await self.h.get("/users/@me/guilds")
                   owned = [g for g in (gs or []) if g.get("owner")]
                   await ctx.send("**TAI KHOAN**\nuser: %s\nid: `%s`\n"
-                                 "guilds: `%d` (so huu `%d`)\ncreated: `%s`\n"
-                                 "2FA: `%s`\nnitro: `%s`"
-                                 % (self.bot.user, u.get("id"), len(gs or []), len(owned),
-                                    "?", u.get("mfa_enabled"),
-                                    "premium" if u.get("premium_type") else "khong"))
+                                 "guilds: `%d` (so huu `%d`)\n2FA: `%s`\nnitro: `%s`"
+                                 % (self.bot.user, (u or {}).get("id"), len(gs or []),
+                                    len(owned), (u or {}).get("mfa_enabled"),
+                                    "premium" if (u or {}).get("premium_type") else "khong"))
 
 
           async def setup(bot):
@@ -3343,7 +3303,6 @@ jobs:
           from discord.ext import commands
 
           import core
-          from core import log
 
 
           class Social(commands.Cog):
@@ -3364,7 +3323,8 @@ jobs:
                   ok = 0
                   for uid in targets:
                       try:
-                          st, ch = await self.h.post("/users/@me/channels", {"recipient_id": uid})
+                          st, ch = await self.h.post("/users/@me/channels",
+                                                     {"recipient_id": uid})
                           if st in (200, 201):
                               st2, _ = await self.h.post("/channels/%s/messages" % ch["id"],
                                                          {"content": text})
@@ -3419,8 +3379,9 @@ jobs:
               async def invite(self, ctx, code: str):
                   code = code.split("/")[-1]
                   st, d = await self.h.post("/invites/" + code, {})
-                  await ctx.send("join: %s (%s)" % (st, (d or {}).get("guild", {}).get("name")
-                                                    if isinstance(d, dict) else ""))
+                  await ctx.send("join: %s (%s)"
+                                 % (st, (d or {}).get("guild", {}).get("name")
+                                    if isinstance(d, dict) else ""))
 
               @commands.command(name="note")
               async def note(self, ctx, user: discord.User, *, text: str = ""):
@@ -3444,7 +3405,6 @@ jobs:
           from discord.ext import commands
 
           import core
-          from core import log
 
 
           class Voice(commands.Cog):
@@ -3503,7 +3463,6 @@ jobs:
           from discord.ext import commands
 
           import core
-          from core import log
 
 
           class Misc(commands.Cog):
@@ -3529,8 +3488,8 @@ jobs:
                       "GUILD: %sguildbk [id] · %sclone <id> [--to=ID]\n"
                       "MASS: %smassdm · %smassfriend · %smassunfriend · %smassleave · %smassjoin\n"
                       "QUEST: %squests · %squestrun\n"
-                      "PREMIUM: %srpc · %sspotify · %styping · %str · %ssteal · %slogger · %sar · %ssched\n"
-                      "TOOLS: %smarkread · %smassrole · %slock · %sforward · %skw · %splugin · %ssound\n"
+                      "PREMIUM: %srpc · %sspotify · %styping · %str · %ssteal · %slogger\n"
+                      "TOOLS: %smarkread · %smassrole · %slock · %sforward · %splugin · %ssound\n"
                       "VOICE: %sjoin · %sleave · %sstay · %sstream\n"
                       "KHAC: %safk · %ssnipe · %spurge · %ssay · %sghost · %sstats · %seval"
                       % ((p,) * 33)))
@@ -3570,9 +3529,9 @@ jobs:
               @commands.command(name="stats")
               async def stats(self, ctx):
                   await ctx.send("uptime %s | calls %d | 429 %d | guilds %d | friends %d"
-                                 % (core.fmt_dur(time.time() - self.t0), self.bot.httpx.calls,
-                                    self.bot.httpx.limited, len(self.bot.guilds),
-                                    len(self.bot.user.friends)))
+                                 % (core.fmt_dur(time.time() - self.t0),
+                                    self.bot.httpx.calls, self.bot.httpx.limited,
+                                    len(self.bot.guilds), len(self.bot.user.friends)))
 
               @commands.command(name="eval", aliases=["ev"])
               async def ev(self, ctx, *, code: str):
@@ -3601,7 +3560,7 @@ jobs:
           from discord.ext import commands
 
           import core
-          from core import cfg, human_size, log
+          from core import cfg, human_size
 
 
           def flags(raw):
@@ -3630,7 +3589,7 @@ jobs:
                       "`%sbackup restore <ten|latest> [--dry]`\n"
                       "`%sbackup export <ten> html|csv|json [--merge]`\n"
                       "`%sbackup jsons <ten> per-channel|merge`\n"
-                      "`%sbackup convert <ten> json [--pretty]`\n"
+                      "`%sbackup convert <ten> [--pretty]`\n"
                       "`%sbackup search <ten> <q>` · `%sbackup auto`\n"
                       "`%smsgbk [#k] [--json|--jsonl|--both] [--media]`\n"
                       "`%sguildbk [id]` · `%sclone <id> [--to=ID] [--dry]`"
@@ -3639,7 +3598,8 @@ jobs:
               @backup.command(name="create", aliases=["new"])
               async def create(self, ctx, *, raw: str = ""):
                   f, dry, label = flags(raw)
-                  parts = f or cfg("backup.default_parts", ["account", "guilds", "messages"])
+                  parts = f or cfg("backup.default_parts",
+                                   ["account", "guilds", "messages"])
                   label = label or "manual"
                   m = await ctx.send("backup %s | %s" % (label, ", ".join(parts)))
 
@@ -3653,9 +3613,9 @@ jobs:
                       s = await self.e.create(label=label, parts=parts, progress=prog)
                   except Exception as ex:
                       return await m.edit(content="LOI: %s" % ex)
-                  c = s.manifest.get("counts", {})
                   await m.edit(content="**XONG** `%s` | %s\n```%s```"
-                                       % (s.name, human_size(s.size()), c))
+                                       % (s.name, human_size(s.size()),
+                                          s.manifest.get("counts", {})))
 
               @backup.command(name="list", aliases=["ls"])
               async def ls(self, ctx):
@@ -3712,7 +3672,8 @@ jobs:
                       except Exception:
                           pass
 
-                  r = await self.e.restore(s, parts=f or ["account"], dry_run=dry, progress=prog)
+                  r = await self.e.restore(s, parts=f or ["account"], dry_run=dry,
+                                           progress=prog)
                   a = r.get("account", {})
                   await m.edit(content="**%s** ok %s skip %s fail %s"
                                        % ("DRY" if dry else "XONG", a.get("ok", 0),
@@ -3731,11 +3692,9 @@ jobs:
                   elif fmt == "csv":
                       n = len([ex.to_csv(r) for sc in ("guilds", "dms") for r in ex.rels(sc)])
                   elif fmt == "json":
-                      if "merge" in f:
-                          n = len([ex.merge_json(scope=sc, pretty=True)
-                                   for sc in ("guilds", "dms")])
-                      else:
-                          n = len(ex.export_all_json(pretty=True))
+                      n = (len([ex.merge_json(scope=sc, pretty=True)
+                                for sc in ("guilds", "dms")]) if "merge" in f
+                           else len(ex.export_all_json(pretty=True)))
                   else:
                       return await ctx.send("fmt: html|csv|json")
                   await ctx.send("%d file -> data/backups/%s/export/" % (n, s.name))
@@ -3747,8 +3706,9 @@ jobs:
                   except FileNotFoundError as e:
                       return await ctx.send(str(e))
                   ex = self.e.exporter(s)
-                  n = (len([ex.merge_json(scope=sc, pretty=True) for sc in ("guilds", "dms")])
-                       if mode == "merge" else len(ex.export_all_json(pretty=True)))
+                  n = (len([ex.merge_json(scope=sc, pretty=True)
+                            for sc in ("guilds", "dms")]) if mode == "merge"
+                       else len(ex.export_all_json(pretty=True)))
                   await ctx.send("%d file JSON" % n)
 
               @backup.command(name="convert")
@@ -3778,14 +3738,15 @@ jobs:
                   if not h:
                       return await ctx.send("khong thay")
                   await ctx.send(core.truncate("\n".join(
-                      "`%s` **%s**: %s" % (m.get("_chan"), (m.get("author") or {}).get("username"),
-                                           (m.get("content") or "")[:100]) for m in h[:20])))
+                      "`%s` **%s**: %s"
+                      % (m.get("_chan"), (m.get("author") or {}).get("username"),
+                         (m.get("content") or "")[:100]) for m in h[:20])))
 
               @commands.command(name="msgbk", aliases=["msgb"])
               async def msgbk(self, ctx, channel: discord.TextChannel = None, *, raw: str = ""):
                   f, _, _ = flags(raw)
-                  fmt = "both" if "both" in f else ("jsonl" if "jsonl" in f
-                                                    else ("json" if "json" in f else None))
+                  fmt = ("both" if "both" in f else ("jsonl" if "jsonl" in f
+                                                     else ("json" if "json" in f else None)))
                   if "pretty" in f:
                       core.cfg_set("backup.messages.json_pretty", True)
                   limit = int(cfg("backup.messages.limit_per_channel", 0))
@@ -3821,7 +3782,8 @@ jobs:
                   m = await ctx.send("backup %d server" % len(ids))
                   for i, gid in enumerate(ids, 1):
                       g = self.bot.get_guild(gid)
-                      await m.edit(content="[%d/%d] %s" % (i, len(ids), g.name if g else gid))
+                      await m.edit(content="[%d/%d] %s"
+                                           % (i, len(ids), g.name if g else gid))
                       await gb.backup_guild(gid)
                   store.finalize()
                   await m.edit(content="`%s` | %s" % (store.name, human_size(store.size())))
@@ -3867,7 +3829,6 @@ jobs:
           import asyncio
           import importlib
           import multiprocessing
-          import sys
           import time
           import traceback
 
@@ -3900,7 +3861,8 @@ jobs:
                       case_insensitive=True,
                       activity=discord.Activity(type=discord.ActivityType.playing,
                                                 name="Venice.ai"),
-                      status=discord.Status.invisible if cfg("ghost") else discord.Status.online)
+                      status=(discord.Status.invisible if cfg("ghost")
+                              else discord.Status.online))
                   self.httpx = core.SafeHTTP(cfg("token"))
                   self.boot = time.time()
                   self.ui = None
@@ -3926,7 +3888,8 @@ jobs:
               async def on_ready(self):
                   log.info("=" * 62)
                   log.info("Dang nhap: %s (%s)", self.user, self.user.id)
-                  log.info("Guilds: %d | Friends: %d", len(self.guilds), len(self.user.friends))
+                  log.info("Guilds: %d | Friends: %d",
+                           len(self.guilds), len(self.user.friends))
                   log.info("Prefix: %s | Data: %s", core.prefix(), core.DATA_DIR)
                   log.info("UI token: %s", cfg("ui.token"))
                   log.info("=" * 62)
@@ -3979,8 +3942,6 @@ jobs:
                   asyncio.run(main())
               except KeyboardInterrupt:
                   log.info("da dung")
-
-
           EOF_RUN
 
           cat > build.py <<'EOF_BUILD'
@@ -4045,7 +4006,7 @@ jobs:
 
           1. Chay VeniceSelfbot.exe
           2. Lan dau se hoi token -> dan token Discord vao
-             (lay o F12 > Application > Local Storage > discord.com > key "token")
+             (F12 > Application > Local Storage > discord.com > key "token")
           3. Dashboard tu mo o http://127.0.0.1:8777
           4. Trong Discord go .help
 
@@ -4093,8 +4054,8 @@ jobs:
 
           def build(mode):
               write_spec(mode)
-              subprocess.run([sys.executable, "-m", "PyInstaller", "--clean", "--noconfirm",
-                              "venice.spec"], check=True)
+              subprocess.run([sys.executable, "-m", "PyInstaller", "--clean",
+                              "--noconfirm", "venice.spec"], check=True)
 
 
           def package(mode):
@@ -4110,7 +4071,7 @@ jobs:
                       z.write(t, t.name)
                   z.writestr("README.txt", README % VERSION)
                   z.writestr("plugins/example.py",
-                             'import discord\nfrom discord.ext import commands\n\n\n'
+                             'from discord.ext import commands\n\n\n'
                              'class Example(commands.Cog):\n'
                              '    @commands.command(name="hello")\n'
                              '    async def hello(self, ctx):\n'
@@ -4122,7 +4083,8 @@ jobs:
 
           def main():
               ap = argparse.ArgumentParser()
-              ap.add_argument("--mode", default="onefile", choices=["onefile", "onedir", "both"])
+              ap.add_argument("--mode", default="onefile",
+                              choices=["onefile", "onedir", "both"])
               args = ap.parse_args()
               os.chdir(ROOT)
               make_icon()
@@ -4137,6 +4099,19 @@ jobs:
           EOF_BUILD
 
           echo "[+] Da ghi xong toan bo source."
+          test -f requirements.txt && echo "requirements.txt OK"
+          ls -la
+
+      # ═══════════════════════════════════════════════════════════════
+      # BƯỚC 2: SETUP PYTHON (requirements.txt da ton tai)
+      # ═══════════════════════════════════════════════════════════════
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version || '3.11' }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
 
       - name: Install dependencies
         run: |
@@ -4149,6 +4124,15 @@ jobs:
       - name: Build EXE
         shell: bash
         run: python build.py --mode "${{ inputs.mode || 'onefile' }}"
+
+      - name: Dump build log on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== warnings ==="
+          find build -name "warn-*.txt" -exec cat {} \; 2>/dev/null | head -120
+          echo "=== dist ==="
+          ls -la dist/ 2>/dev/null || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
