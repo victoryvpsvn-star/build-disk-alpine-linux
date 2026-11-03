@@ -18,6 +18,13 @@ on:
       extra_packages:
         description: "Gói cài thêm (cách nhau bằng dấu cách)"
         default: "wget nano htop bind9-dnsutils"
+      sleep_mode:
+        description: "Chế độ ngủ: thoát hết SSH thì VM tự đóng băng dịch vụ để tiết kiệm CPU, SSH vào lại tự chạy tiếp"
+        type: boolean
+        default: true
+      sleep_grace:
+        description: "Số giây chờ sau khi thoát hết SSH rồi mới ngủ (tối thiểu 10)"
+        default: "60"
       run_tests:
         description: "Chạy thử bản sao bằng QEMU (apt update, cài nhiều gói, ghi nặng...) trước khi xuất file"
         type: boolean
@@ -68,6 +75,8 @@ jobs:
           SIZE: ${{ inputs.image_size }}
           SUITE: ${{ inputs.debian_suite }}
           EXTRA: ${{ inputs.extra_packages }}
+          SLEEP_MODE: ${{ inputs.sleep_mode }}
+          SLEEP_GRACE: ${{ inputs.sleep_grace }}
         run: |
           set -euo pipefail
           T=/mnt/target
@@ -81,6 +90,11 @@ jobs:
           trap cleanup EXIT
 
           ch() { sudo chroot "$T" /usr/bin/env DEBIAN_FRONTEND=noninteractive LANG=C "$@"; }
+
+          # Chuẩn hóa cấu hình chế độ ngủ
+          if [ "$SLEEP_MODE" = "true" ]; then SLEEP_ON=1; else SLEEP_ON=0; fi
+          case "$SLEEP_GRACE" in ''|*[!0-9]*) SLEEP_GRACE=60 ;; esac
+          [ "$SLEEP_GRACE" -ge 10 ] || SLEEP_GRACE=10
 
           # ---------- Tạo ổ đĩa + phân vùng GPT (EFI 64MiB + root) ----------
           truncate -s "$SIZE" debian.img
@@ -496,12 +510,157 @@ jobs:
           EOF
           sudo chmod +x "$T/usr/local/bin/checkvm"
 
+          # ---------- Chế độ ngủ (sleepmode): hết SSH thì đóng băng dịch vụ, SSH vào lại tự rã đông ----------
+          sudo tee "$T/etc/sleepmode.conf" >/dev/null <<EOF
+          # ENABLE=1 bật, 0 tắt (hoặc dùng lệnh: sleepmode on / sleepmode off)
+          ENABLE=$SLEEP_ON
+          # Số giây chờ sau khi hết SSH rồi mới ngủ
+          GRACE=$SLEEP_GRACE
+          # Dịch vụ KHÔNG bị đóng băng, viết dạng regex (vd: nginx|mariadb)
+          KEEP=""
+          # RECLAIM=1: sau khi ngủ, đẩy RAM của phần bị đóng băng ra swap + dọn cache để Hyper-V (Dynamic Memory) thu hồi được RAM
+          RECLAIM=1
+          # Dung lượng swapfile tự tạo nếu máy chưa có swap
+          SWAPSIZE=512M
+          EOF
+
+          sudo tee "$T/usr/local/sbin/sleepmode" >/dev/null <<'EOF'
+          #!/bin/sh
+          # sleepmode daemon : không còn ai SSH vào -> đóng băng (cgroup freezer) các dịch vụ và phiên người dùng.
+          #                    Có SSH vào -> rã đông TRƯỚC khi đăng nhập, mọi thứ chạy tiếp như bình thường.
+          # sleepmode status | on | off
+          CONF=/etc/sleepmode.conf
+          STATE=/run/sleepmode.frozen
+          LOCK=/run/sleepmode.lock
+          ENABLE=1; GRACE=60; KEEP=""; RECLAIM=1; SWAPSIZE=512M
+          [ -r "$CONF" ] && . "$CONF"
+
+          log() { echo "sleepmode: $*" > /dev/console 2>/dev/null || true; }
+          conns() { ss -Htn state established '( sport = :22 )' 2>/dev/null | wc -l; }
+
+          do_thaw() {
+            (
+              flock 9
+              [ -e "$STATE" ] || exit 0
+              LIST=$(cat "$STATE")
+              # shellcheck disable=SC2086
+              systemctl thaw $LIST 2>/dev/null || for u in $LIST; do systemctl thaw "$u" 2>/dev/null; done
+              rm -f "$STATE"
+              log "THAWED"
+            ) 9>"$LOCK"
+          }
+
+          # Trả RAM: đẩy RAM của các cgroup đang đóng băng ra swap rồi dọn cache.
+          # Chạy trong do_freeze (đang giữ lock).
+          do_reclaim() {
+            [ "${RECLAIM:-1}" = 1 ] || return 0
+            if ! swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
+              addswap "${SWAPSIZE:-512M}" >/dev/null 2>&1 || true
+            fi
+            for u in $(cat "$STATE"); do
+              case "$u" in
+                *.slice) cg=/sys/fs/cgroup/$u ;;
+                *) cg=/sys/fs/cgroup/system.slice/$u ;;
+              esac
+              [ -w "$cg/memory.reclaim" ] || continue
+              cur=$(cat "$cg/memory.current" 2>/dev/null) || continue
+              echo "$cur" > "$cg/memory.reclaim" 2>/dev/null || true
+            done
+            sync
+            echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+            log "RECLAIMED (RAM con dung: $(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END{print int((t-a)/1024)}' /proc/meminfo) MB)"
+          }
+
+          do_freeze() {
+            (
+              flock 9
+              [ -e "$STATE" ] && exit 0
+              EX='^(ssh|systemd-|dbus|netdetect|sleepmode|getty|serial-getty|console-getty|polkit)'
+              [ -n "$KEEP" ] && EX="$EX|$KEEP"
+              LIST=$(systemctl list-units --type=service --state=running --no-legend --plain | awk '{print $1}' | grep -Ev "$EX" || true)
+              : > "$STATE.new"
+              for u in $LIST user.slice; do
+                systemctl freeze "$u" 2>/dev/null && echo "$u" >> "$STATE.new"
+              done
+              mv "$STATE.new" "$STATE"
+              log "FROZEN ($(wc -l < "$STATE") muc)"
+              do_reclaim
+            ) 9>"$LOCK"
+          }
+
+          daemon() {
+            idle=0
+            while :; do
+              [ -r "$CONF" ] && . "$CONF"
+              if [ "${ENABLE:-1}" != 1 ]; then
+                do_thaw; idle=0
+              elif [ "$(conns)" -gt 0 ]; then
+                do_thaw; idle=0
+              else
+                idle=$((idle + 5))
+                if [ "$idle" -ge "${GRACE:-60}" ]; then
+                  do_freeze
+                  # có người SSH vào đúng lúc đang đóng băng -> rã đông ngay
+                  if [ "$(conns)" -gt 0 ]; then do_thaw; idle=0; fi
+                fi
+              fi
+              sleep 5
+            done
+          }
+
+          setconf() {
+            if grep -q '^ENABLE=' "$CONF" 2>/dev/null; then sed -i "s/^ENABLE=.*/ENABLE=$1/" "$CONF"; else echo "ENABLE=$1" >> "$CONF"; fi
+          }
+
+          case "${1:-status}" in
+            daemon) daemon ;;
+            thaw) do_thaw ;;
+            on)  [ "$(id -u)" = 0 ] || { echo "Cần chạy bằng root"; exit 1; }; setconf 1; echo "Đã bật chế độ ngủ (chờ ${GRACE}s sau khi thoát hết SSH)." ;;
+            off) [ "$(id -u)" = 0 ] || { echo "Cần chạy bằng root"; exit 1; }; setconf 0; do_thaw; echo "Đã tắt chế độ ngủ." ;;
+            status)
+              if [ "${ENABLE:-1}" = 1 ]; then echo "Chế độ ngủ : BẬT (chờ ${GRACE}s sau khi thoát hết SSH)"; else echo "Chế độ ngủ : TẮT"; fi
+              echo "Số kết nối SSH hiện tại: $(conns)"
+              if [ -e "$STATE" ]; then echo "Đang ngủ, các mục bị đóng băng:"; sed 's/^/  /' "$STATE"; else echo "Đang thức."; fi
+              [ -n "$KEEP" ] && echo "Không đóng băng (KEEP): $KEEP"
+              exit 0 ;;
+            *) echo "Dùng: sleepmode [status|on|off]"; exit 1 ;;
+          esac
+          EOF
+          sudo chmod +x "$T/usr/local/sbin/sleepmode"
+          sudo ln -sf /usr/local/sbin/sleepmode "$T/usr/local/bin/sleepmode"
+
+          # PAM: mỗi lần SSH vào, rã đông đồng bộ trước khi phiên đăng nhập được tạo
+          sudo tee "$T/usr/local/sbin/sleephook" >/dev/null <<'EOF'
+          #!/bin/sh
+          [ "${PAM_TYPE:-}" = "open_session" ] && /usr/local/sbin/sleepmode thaw
+          exit 0
+          EOF
+          sudo chmod +x "$T/usr/local/sbin/sleephook"
+          sudo test -f "$T/etc/pam.d/sshd"
+          sudo sed -i '1i session optional pam_exec.so quiet /usr/local/sbin/sleephook' "$T/etc/pam.d/sshd"
+
+          sudo tee "$T/etc/systemd/system/sleepmode.service" >/dev/null <<'EOF'
+          [Unit]
+          Description=Freeze services while nobody is connected over SSH
+          After=ssh.service network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/sbin/sleepmode daemon
+          ExecStop=/usr/local/sbin/sleepmode thaw
+          TimeoutStopSec=20
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
           # ---------- Nhẹ: log trong RAM, bỏ timer cập nhật, fstrim hàng ngày ----------
           sudo mkdir -p "$T/etc/systemd/journald.conf.d" "$T/etc/systemd/system/fstrim.timer.d"
           printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=16M\n' | sudo tee "$T/etc/systemd/journald.conf.d/volatile.conf" >/dev/null
           printf '[Timer]\nOnCalendar=\nOnCalendar=daily\nPersistent=true\n' | sudo tee "$T/etc/systemd/system/fstrim.timer.d/daily.conf" >/dev/null
 
-          ch systemctl enable systemd-networkd ssh ssh-hostkeys netdetect systemd-timesyncd
+          ch systemctl enable systemd-networkd ssh ssh-hostkeys netdetect sleepmode systemd-timesyncd
           ch systemctl enable fstrim.timer || echo "CẢNH BÁO: không bật được fstrim.timer"
           ch systemctl mask apt-daily.timer apt-daily-upgrade.timer || true
 
@@ -548,10 +707,15 @@ jobs:
         env:
           ROOT_PW: ${{ inputs.root_password }}
           PKGS: ${{ inputs.test_packages }}
+          SLEEP: ${{ inputs.sleep_mode }}
+          SLEEP_GRACE: ${{ inputs.sleep_grace }}
         run: |
           set -euo pipefail
           cp --sparse=always debian.img test.img
           : > serial.log
+
+          case "$SLEEP_GRACE" in ''|*[!0-9]*) SLEEP_GRACE=60 ;; esac
+          [ "$SLEEP_GRACE" -ge 10 ] || SLEEP_GRACE=10
 
           # Bật KVM trên runner nếu có, không thì dùng giả lập (chậm hơn nhiều)
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
@@ -624,6 +788,7 @@ jobs:
 
           {
             printf 'PKGS=%q\n' "$PKGS"
+            printf 'SLEEP=%q\n' "$SLEEP"
             cat <<'REMOTE'
           set -u
           FAIL=0
@@ -688,6 +853,7 @@ jobs:
           if ipcheck >/dev/null 2>&1; then pass "ipcheck"; else fail "ipcheck lỗi"; fi
           if addswap 256M >/dev/null 2>&1 && swapon --show | grep -q swapfile; then pass "addswap"; else fail "addswap lỗi"; fi
           addswap off >/dev/null 2>&1
+          if sleepmode status >/dev/null 2>&1; then pass "sleepmode status"; else fail "sleepmode status lỗi"; fi
 
           echo "== Lỗi I/O trong kernel =="
           if dmesg | grep -iE 'I/O error|EXT4-fs error|Buffer I/O|blk_update_request|blocked for more than'; then
@@ -696,10 +862,76 @@ jobs:
             pass "dmesg không có lỗi I/O"
           fi
 
+          # Tiến trình "đồng hồ" để lát nữa chứng minh VM thật sự bị đóng băng khi không có SSH
+          if [ "$SLEEP" = "true" ]; then
+            rm -f /root/tick
+            systemd-run --quiet --unit=sleeptick sh -c 'while :; do date +%s >> /root/tick; sleep 1; done'
+          fi
+
           echo "KET QUA LAN 1: $([ "$FAIL" = 0 ] && echo DAT || echo KHONG DAT)"
           exit $FAIL
           REMOTE
           } | rsh 'bash -s' | tee test.log
+
+          if [ "$SLEEP" = "true" ]; then
+          echo "################ KIỂM TRA CHẾ ĐỘ NGỦ: thoát SSH -> tự đóng băng -> SSH lại chạy bình thường ################"
+          N0=$(grep -c 'sleepmode: FROZEN' serial.log || true)
+          echo "Đã thoát SSH, chờ VM tự đóng băng (cấu hình chờ ${SLEEP_GRACE}s)..."
+          N1=$N0
+          for i in $(seq 1 $(( (SLEEP_GRACE + 90) / 5 ))); do
+            N1=$(grep -c 'sleepmode: FROZEN' serial.log || true)
+            if [ "$N1" -gt "$N0" ]; then break; fi
+            sleep 5
+          done
+          if [ "$N1" -gt "$N0" ]; then
+            echo "[PASS] VM tự đóng băng khi không còn SSH" | tee -a test.log
+          else
+            echo "[FAIL] VM không tự đóng băng. 40 dòng cuối serial.log:" | tee -a test.log
+            tail -40 serial.log
+            exit 1
+          fi
+          sleep 20
+          if grep -q 'sleepmode: RECLAIMED' serial.log; then
+            echo "[PASS] đã đẩy RAM ra swap / dọn cache khi ngủ" | tee -a test.log
+            grep 'sleepmode: RECLAIMED' serial.log | tail -1 | tee -a test.log
+          else
+            echo "[FAIL] không thấy bước trả RAM (RECLAIMED)" | tee -a test.log
+            tail -40 serial.log
+            exit 1
+          fi
+          H0=$(grep -c 'sleepmode: THAWED' serial.log || true)
+
+          # SSH lại: nếu rã đông lỗi thì phiên đăng nhập sẽ treo, nên có giới hạn 120 giây
+          timeout 120 sshpass -e ssh $SSH_OPTS root@127.0.0.1 'bash -s' <<'REMOTE_SLEEP' | tee -a test.log
+          set -u
+          FAIL=0
+          pass() { echo "[PASS] $*"; }
+          fail() { echo "[FAIL] $*"; FAIL=1; }
+          export DEBIAN_FRONTEND=noninteractive
+
+          if [ ! -e /run/sleepmode.frozen ]; then pass "đã rã đông ngay khi SSH vào lại"; else fail "vẫn còn ở trạng thái ngủ"; fi
+          systemctl stop sleeptick
+          GAP=$(awk 'NR>1{d=$1-p; if(d>m)m=d} {p=$1} END{print m+0}' /root/tick)
+          echo "Tiến trình thử bị ngừng lâu nhất: ${GAP}s"
+          if [ "$GAP" -gt 15 ]; then pass "tiến trình thật sự bị đóng băng lúc không có SSH"; else fail "tiến trình không bị đóng băng (ngừng chỉ ${GAP}s)"; fi
+          if apt-get update >/dev/null 2>&1; then pass "apt update chạy bình thường sau khi thức"; else fail "apt update lỗi sau khi thức"; fi
+          if systemctl is-active --quiet ssh; then pass "ssh vẫn chạy"; else fail "ssh không chạy"; fi
+          if swapon --show | grep -q .; then pass "đã có swap để chứa RAM bị đẩy ra"; else fail "không có swap"; fi
+          F=$(systemctl --failed --no-legend --plain)
+          if [ -z "$F" ]; then pass "không có dịch vụ lỗi sau khi thức"; else fail "dịch vụ lỗi: $F"; fi
+          rm -f /root/tick
+          echo "KET QUA TEST NGU: $([ "$FAIL" = 0 ] && echo DAT || echo KHONG DAT)"
+          exit $FAIL
+          REMOTE_SLEEP
+
+          H1=$(grep -c 'sleepmode: THAWED' serial.log || true)
+          if [ "$H1" -gt "$H0" ]; then
+            echo "[PASS] daemon/PAM đã rã đông khi có SSH vào" | tee -a test.log
+          else
+            echo "[FAIL] không thấy log rã đông" | tee -a test.log
+            exit 1
+          fi
+          fi
 
           echo "################ LẦN BOOT 2: khởi động lại, kiểm tra còn ổn ################"
           rsh 'systemctl reboot' >/dev/null 2>&1 || true
@@ -782,4 +1014,5 @@ jobs:
             Debian **${{ inputs.debian_suite }}** tối giản (không GUI), boot UEFI (Hyper-V Gen2: tắt Secure Boot).
             Mạng: DHCP tự động, SSH root bật sẵn.
             Sau khi tăng ổ đĩa trong Hyper-V, chạy lệnh `updisk` trong VM.
+            Chế độ ngủ: thoát hết SSH thì VM tự đóng băng dịch vụ, SSH vào lại tự chạy tiếp. Xem/tắt bằng `sleepmode status|off|on`.
           files: out/*.zip
